@@ -1,0 +1,215 @@
+package limiter
+
+import (
+	"context"
+	"sort"
+	"sync"
+
+	"github.com/Tencent/WeKnora/internal/types"
+)
+
+// The concurrency governor is process-wide, shared by every model-client layer
+// that fronts a provider (chat, vlm). Keeping the singleton here — rather than
+// inside one client package — lets all of them gate against the same limiter
+// and per-model limit without importing each other. Wired once at startup (see
+// container.registerModelConcurrencyLimiter) via SetGovernor.
+var (
+	governorMu sync.RWMutex
+	governor   ModelConcurrencyLimiter
+	governorN  int
+)
+
+// SetGovernor installs the process-wide background concurrency governor and the
+// default per-model limit. Passing a nil limiter or a non-positive limit
+// disables governance (all calls pass through). Safe to call at startup.
+func SetGovernor(l ModelConcurrencyLimiter, limit int) {
+	governorMu.Lock()
+	defer governorMu.Unlock()
+	governor = l
+	governorN = limit
+}
+
+// SetGlobalLimit updates ONLY the process-wide default per-model limit,
+// leaving the installed limiter backend intact. Used by the system-settings
+// runtime bridge so an operator can retune model.max_concurrency without a
+// restart. A non-positive value disables the default (models that carry their
+// own MaxConcurrency still honour it).
+func SetGlobalLimit(limit int) {
+	governorMu.Lock()
+	defer governorMu.Unlock()
+	governorN = limit
+}
+
+// Gate acquires a per-model concurrency slot using the process-wide default
+// limit. Equivalent to GateN(ctx, modelID, 0).
+func Gate(ctx context.Context, modelID string) func() {
+	return GateN(ctx, modelID, 0)
+}
+
+// GateN acquires a per-model concurrency slot when the call is a background task
+// (see types.IsBackgroundTask) and a governor is installed. modelLimit is the
+// model's own configured cap; a value <= 0 means "fall back to the process-wide
+// default" (governorN). It returns a release func that is ALWAYS safe to call:
+// on the passthrough / fail-open paths it is a cheap no-op. The gate never
+// blocks a call permanently — a limiter/Redis outage or a cancelled context
+// fails open.
+func GateN(ctx context.Context, modelID string, modelLimit int) func() {
+	return GateNamedN(ctx, modelID, "", modelLimit)
+}
+
+func GateNamedN(ctx context.Context, modelID, modelName string, modelLimit int) func() {
+	governorMu.RLock()
+	l, defaultLimit := governor, governorN
+	governorMu.RUnlock()
+
+	limit := modelLimit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if l == nil || limit <= 0 || !types.IsBackgroundTask(ctx) {
+		return noop
+	}
+	if named, ok := l.(interface{ SetModelName(string, string) }); ok {
+		named.SetModelName(modelID, modelName)
+	}
+	release, err := l.Acquire(ctx, modelID, limit)
+	if err != nil || release == nil {
+		return noop
+	}
+	return release
+}
+
+// RuntimeStats returns the semaphores observed by this process. Redis-backed
+// limiters report cluster-wide active holders; waiting callers remain local to
+// this instance by design.
+func RuntimeStats(ctx context.Context) ([]RuntimeStat, bool, error) {
+	governorMu.RLock()
+	l := governor
+	governorMu.RUnlock()
+	inspector, ok := l.(runtimeInspectable)
+	if !ok || inspector == nil {
+		return []RuntimeStat{}, false, nil
+	}
+	stats, err := inspector.RuntimeStats(ctx)
+	if stats == nil {
+		stats = []RuntimeStat{}
+	}
+	return stats, true, err
+}
+
+// localLimiter is an in-process (single-node) counting semaphore keyed by
+// model ID. It is the Lite-mode counterpart to the Redis limiter: Lite runs a
+// single process with no Redis, so a shared distributed semaphore is neither
+// available nor needed — but background ingestion can still burst the whole
+// worker pool against one provider, so we still cap concurrency locally.
+type localLimiter struct {
+	mu      sync.Mutex
+	sems    map[string]*localSemaphore
+	tracked map[string]*trackedSemaphore
+}
+
+// localSemaphore supports live concurrency changes. A channel's capacity is
+// immutable, so using a buffered channel here would leave a model stuck at its
+// first configured limit for the lifetime of the Lite process.
+type localSemaphore struct {
+	mu      sync.Mutex
+	active  int
+	limit   int
+	changed chan struct{}
+}
+
+func (s *localSemaphore) notifyLocked() {
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+func (s *localSemaphore) snapshot() (active, limit int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active, s.limit
+}
+
+// NewLocalLimiter builds an in-process per-key concurrency limiter.
+func NewLocalLimiter() ModelConcurrencyLimiter {
+	return &localLimiter{sems: make(map[string]*localSemaphore), tracked: make(map[string]*trackedSemaphore)}
+}
+
+func (l *localLimiter) Acquire(ctx context.Context, key string, limit int) (func(), error) {
+	if l == nil || limit <= 0 || key == "" {
+		return noop, nil
+	}
+
+	l.mu.Lock()
+	sem := l.sems[key]
+	if sem == nil {
+		sem = &localSemaphore{limit: limit, changed: make(chan struct{})}
+		l.sems[key] = sem
+	}
+	tracked := l.tracked[key]
+	if tracked == nil {
+		tracked = &trackedSemaphore{}
+		l.tracked[key] = tracked
+	}
+	tracked.limit.Store(int64(limit))
+	l.mu.Unlock()
+	tracked.waiting.Add(1)
+	defer tracked.waiting.Add(-1)
+
+	for {
+		sem.mu.Lock()
+		if sem.limit != limit {
+			sem.limit = limit
+			sem.notifyLocked()
+		}
+		if sem.active < sem.limit {
+			sem.active++
+			sem.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					sem.mu.Lock()
+					sem.active--
+					sem.notifyLocked()
+					sem.mu.Unlock()
+				})
+			}, nil
+		}
+		changed := sem.changed
+		sem.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			// Fail open on cancellation, mirroring the Redis limiter.
+			return noop, nil
+		}
+	}
+}
+
+func (l *localLimiter) RuntimeStats(_ context.Context) ([]RuntimeStat, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	stats := make([]RuntimeStat, 0, len(l.sems))
+	for modelID, sem := range l.sems {
+		tracked := l.tracked[modelID]
+		name, _ := tracked.name.Load().(string)
+		active, limit := sem.snapshot()
+		stats = append(stats, RuntimeStat{ModelID: modelID, Name: name, Active: int64(active), Waiting: tracked.waiting.Load(), Limit: limit})
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].ModelID < stats[j].ModelID })
+	return stats, nil
+}
+
+func (l *localLimiter) SetModelName(modelID, name string) {
+	if modelID == "" || name == "" {
+		return
+	}
+	l.mu.Lock()
+	tracked := l.tracked[modelID]
+	if tracked == nil {
+		tracked = &trackedSemaphore{}
+		l.tracked[modelID] = tracked
+	}
+	l.mu.Unlock()
+	tracked.name.Store(name)
+}

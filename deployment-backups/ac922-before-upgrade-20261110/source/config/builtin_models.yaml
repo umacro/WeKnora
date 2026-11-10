@@ -1,0 +1,23 @@
+builtin_models:
+  - id: ac922-bge-m3-embedding
+    name: BAAI/bge-m3
+    type: Embedding
+    source: remote
+    description: Local BGE-M3 multilingual embedding API on ac922
+    is_default: true
+    parameters:
+      base_url: http://127.0.0.1:8901/v1
+      provider: generic
+      embedding_parameters:
+        dimension: 1024
+  - id: ac922-bge-reranker-v2-m3
+    name: BAAI/bge-reranker-v2-m3
+    type: Rerank
+    source: remote
+    description: Local BGE Reranker v2 M3 API on ac922
+    is_default: true
+    parameters:
+      base_url: http://127.0.0.1:8902
+      provider: huggingface_tei
+      extra_config:
+        score_scale: logit
