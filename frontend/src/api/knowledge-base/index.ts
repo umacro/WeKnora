@@ -736,6 +736,71 @@ export function regenerateGeneratedQuestions(chunkId: string) {
   return post(`/api/v1/chunks/by-id/${chunkId}/questions/regenerate`, {});
 }
 
+export type GeneratedQuestionListFormat = 'list' | 'text' | 'csv' | 'json' | 'training_jsonl';
+export type GeneratedQuestionDuplicateMode = 'all' | 'duplicates' | 'unique';
+
+export interface GeneratedQuestionListItem {
+  row_key: string;
+  question_id: string | null;
+  question: string;
+  knowledge_base_id: string;
+  wiki_id: string | null;
+  knowledge_id: string;
+  knowledge_title: string | null;
+  task_id: string | null;
+  chunk_id: string;
+  chunk_index: number;
+  question_position: number;
+  generated_at: string | null;
+  question_revision: number | null;
+  current_chunk_revision: number;
+  revision_state: 'current' | 'stale' | 'unknown';
+  chunk_availability: 'available' | 'disabled';
+  index_status: string;
+  task_state: 'unknown';
+  question_data_state: 'available' | 'missing_text';
+  is_duplicate: boolean;
+  duplicate_group_key: string | null;
+  duplicate_count: number;
+}
+
+export interface GeneratedQuestionListParams {
+  page?: number;
+  page_size?: number;
+  knowledge_id?: string;
+  chunk_id?: string;
+  keyword?: string;
+  sort_by?: 'chunk_index' | 'question_id';
+  sort_order?: 'asc' | 'desc';
+  duplicate_mode?: GeneratedQuestionDuplicateMode;
+}
+
+export interface GeneratedQuestionListResponse {
+  success: boolean;
+  data: GeneratedQuestionListItem[];
+  total: number;
+  raw_total: number;
+  data_warnings: number;
+  page: number;
+  page_size: number;
+}
+
+/** Read saved document-chunk questions without starting or changing generation. */
+export function listGeneratedQuestions(kbId: string, params?: GeneratedQuestionListParams) {
+  const query = buildQuery(params);
+  return get<GeneratedQuestionListResponse>(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`);
+}
+
+/** Export the complete filtered question result, not only the current page. */
+export function exportGeneratedQuestions(
+  kbId: string,
+  params: GeneratedQuestionListParams,
+  format: Exclude<GeneratedQuestionListFormat, 'list'>,
+): Promise<Blob> {
+  const query = buildQuery({ ...params, format });
+  return getDown(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`);
+}
+
 export function listKnowledgeTags(
   kbId: string,
   params?: { page?: number; page_size?: number; keyword?: string },

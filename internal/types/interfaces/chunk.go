@@ -163,6 +163,11 @@ type ChunkRepository interface {
 	// Filter by kbIDs and/or knowledgeIDs. At least one of them must be non-empty.
 	// Returns up to `limit` chunks sorted by updated_at descending.
 	ListRecentDocumentChunksWithQuestions(ctx context.Context, tenantID uint64, kbIDs []string, knowledgeIDs []string, limit int) ([]*types.Chunk, error)
+	// ListDocumentChunksWithGeneratedQuestions returns all readable text chunks in a KB
+	// that still contain saved generated questions. Disabled and non-indexed chunks are
+	// included so a read-only inventory does not silently hide persisted question data.
+	// Content is loaded only for the filtered training-corpus export.
+	ListDocumentChunksWithGeneratedQuestions(ctx context.Context, tenantID uint64, kbID string, includeContent bool) ([]*types.Chunk, error)
 }
 
 // ChunkService mutations require explicit KB write grants and validate persisted

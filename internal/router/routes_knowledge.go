@@ -52,6 +52,12 @@ func RegisterChunkRoutes(r *gin.RouterGroup, handler *handler.ChunkHandler, g *r
 		chunks.PUT("/by-id/:id/questions", g.OwnedChunkKBOrAdminFromChunkID(), g.KBAccessWriteFromChunkIDParam("id"), handler.UpsertGeneratedQuestion)
 		chunks.POST("/by-id/:id/questions/regenerate", g.OwnedChunkKBOrAdminFromChunkID(), g.KBAccessWriteFromChunkIDParam("id"), handler.RegenerateGeneratedQuestions)
 	}
+
+	// KB-scoped, read-only inventory of questions already saved on document
+	// chunks. The KB guard resolves own/shared access and the effective tenant
+	// before the handler runs; no generation or mutation route is involved.
+	kbQuestionRead := g.apiKeyGroup(r.Group("/knowledge-bases/:id"), apiKeyRetrieve(apiKeyFullAccess()))
+	kbQuestionRead.GET("/generated-questions", g.Viewer(), g.KBAccessRead("id"), handler.ListGeneratedQuestions)
 }
 
 // RegisterKnowledgeRoutes 注册知识相关的路由

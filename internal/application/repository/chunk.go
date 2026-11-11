@@ -1488,6 +1488,43 @@ func (r *chunkRepository) ListRecentDocumentChunksWithQuestions(
 	return chunks, nil
 }
 
+// ListDocumentChunksWithGeneratedQuestions returns every current text chunk in
+// a KB that has a non-empty generated_questions array. Chunk bodies are loaded
+// only when the caller is building the bounded training-corpus export. GORM's
+// default scope omits soft-deleted chunks.
+func (r *chunkRepository) ListDocumentChunksWithGeneratedQuestions(
+	ctx context.Context,
+	tenantID uint64,
+	kbID string,
+	includeContent bool,
+) ([]*types.Chunk, error) {
+	if strings.TrimSpace(kbID) == "" {
+		return nil, nil
+	}
+
+	columns := []string{"id", "knowledge_id", "knowledge_base_id", "chunk_index", "content_revision", "is_enabled", "index_status", "metadata"}
+	if includeContent {
+		columns = append(columns, "content")
+	}
+	query := r.db.WithContext(ctx).
+		Select(columns).
+		Where("tenant_id = ? AND knowledge_base_id = ? AND chunk_type = ?",
+			tenantID, kbID, types.ChunkTypeText)
+
+	switch r.db.Name() {
+	case "postgres":
+		query = query.Where("metadata IS NOT NULL AND jsonb_typeof(COALESCE(metadata->'generated_questions', '[]'::jsonb)) = 'array' AND jsonb_array_length(COALESCE(metadata->'generated_questions', '[]'::jsonb)) > 0")
+	case "mysql":
+		query = query.Where("metadata IS NOT NULL AND JSON_TYPE(JSON_EXTRACT(metadata, '$.generated_questions')) = 'ARRAY' AND JSON_LENGTH(JSON_EXTRACT(metadata, '$.generated_questions')) > 0")
+	default: // WeKnora Lite uses SQLite's JSON1 extension.
+		query = query.Where("metadata IS NOT NULL AND json_valid(metadata) AND json_type(metadata, '$.generated_questions') = 'array' AND json_array_length(metadata, '$.generated_questions') > 0")
+	}
+
+	var chunks []*types.Chunk
+	err := query.Order("knowledge_id ASC, chunk_index ASC, id ASC").Find(&chunks).Error
+	return chunks, err
+}
+
 func (r *chunkRepository) ListAllChunksByKnowledgeID(
 	ctx context.Context,
 	tenantID uint64,

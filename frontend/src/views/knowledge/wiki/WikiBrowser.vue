@@ -58,6 +58,10 @@
               </template>
             </t-popup>
           </div>
+          <t-button size="small" variant="outline" class="generated-questions-open"
+            @click="showGeneratedQuestionsDrawer = true">
+            {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsOpen') }}
+          </t-button>
           <div v-if="stats && stats.pending_issues > 0" class="wiki-global-issues-status graph-issues-badge"
             @click="showGlobalIssuesDrawer = true">
             <t-icon name="error-circle" style="color: var(--td-warning-color);" />
@@ -222,6 +226,10 @@
             @enter="doSearch" @clear="searchResults = null">
             <template #prefixIcon><t-icon name="search" /></template>
           </t-input>
+          <t-button variant="outline" style="width: 100%;" class="generated-questions-open"
+            @click="showGeneratedQuestionsDrawer = true">
+            {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsOpen') }}
+          </t-button>
         </div>
 
         <div class="wiki-page-list" ref="pageListRef">
@@ -695,6 +703,8 @@
       </div>
     </template>
 
+    <GeneratedQuestionsDrawer v-model:visible="showGeneratedQuestionsDrawer" :kb-id="props.knowledgeBaseId" />
+
     <!-- Image Preview -->
     <Teleport to="body">
       <picturePreview v-if="imagePreviewVisible" :reviewImg="imagePreviewVisible" :reviewUrl="imagePreviewUrl"
@@ -831,6 +841,7 @@ import type { ProtectedFileAccessContext } from '@/utils/protectedFileAccess'
 import picturePreview from '@/components/picture-preview.vue'
 import WikiFolderActions from './WikiFolderActions.vue'
 import WikiRevisionDrawer from './WikiRevisionDrawer.vue'
+import GeneratedQuestionsDrawer from './GeneratedQuestionsDrawer.vue'
 import {
   expandedWikiDirectoryPaths,
   expandWikiDirectoryPath,
@@ -1042,6 +1053,7 @@ useAssistantPageContext(() => {
   }
 })
 const showGlobalIssuesDrawer = ref(false)
+const showGeneratedQuestionsDrawer = ref(false)
 const globalIssues = ref<WikiPageIssue[]>([])
 const stats = ref<WikiStats | null>(null)
 const graphData = ref<WikiGraphData | null>(null)
