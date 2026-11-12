@@ -80,10 +80,13 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		"contexts": chatManage.RenderedContexts,
 	})
 	systemPrompt += "\n\n" + types.SourceDataBoundaryPrompt + "\n\n" + types.SourcedAnswerOutputPrompt
-	// Memory goes at the end of the system prompt, after the retrieved-context
-	// placeholders have been rendered, so a remembered sentence can never be
-	// substituted into prompt structure.
+	// Memory follows the rendered retrieved context. For multi-source turns,
+	// append the server-owned evidence policy after memory so it remains the
+	// final instruction in the system message.
 	systemPrompt += chatManage.MemoryPrompt
+	if len(expandCitationSources(orderedPipelineReferences(chatManage))) > 1 {
+		systemPrompt += "\n\n" + types.MultiSourceEvidenceReviewPrompt
+	}
 
 	chatMessages := []chat.Message{
 		{Role: "system", Content: systemPrompt},

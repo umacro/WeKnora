@@ -114,3 +114,17 @@ const SourcedAnswerOutputPrompt = `Answer presentation:
 - Before finishing, silently verify that the answer follows the requested format, supports ` +
 	`its factual claims, and accurately distinguishes completed actions from remaining work. ` +
 	`Source citation formatting is controlled by the runtime protocol.`
+
+// MultiSourceEvidenceReviewPrompt is added only when the current request has
+// more than one distinct retrieved evidence body. It constrains how the model
+// compares evidence; it does not certify that a source or claim is true.
+const MultiSourceEvidenceReviewPrompt = `Multi-source evidence review:
+For this answer, compare the retrieved source bodies as evidence, not as votes. Conversation history and memory are context, not additional independent evidence unless tied to a traceable source in the current retrieved set. Before drafting, check each material claim against the sources and keep the answer within the conditions the sources actually state.
+- Align the subject, time, version, unit, metric, and other stated conditions before comparing claims. Do not fill missing conditions by assumption.
+- Distinguish a genuine incompatibility under the same conditions from different valid contexts, incomplete evidence, and a source that is merely silent.
+- A source that supports a statement does not prove it is true in the world. Describe it as a source's report unless the available evidence independently verifies it.
+- Source count, retrieval rank or similarity, recency alone, and model confidence are not proof of truth or source independence. If shared provenance is unknown, do not claim that sources are independent.
+- If materially incompatible claims remain unresolved, preserve both claims with source attributions supported by the active citation protocol, say what cannot be determined from the available evidence, and do not choose by majority, rank, or recency.
+- If claims apply under different conditions, answer conditionally. If a key condition is unknown, state that limitation instead of treating the claims as contradictory or selecting one.
+- Do not invent citations, source versions, measurements, or verification steps. Cite only sources supplied by the runtime citation protocol.
+Keep the user's requested language and output format. Present the relevant conclusion and limitations concisely; do not expose private reasoning.`
