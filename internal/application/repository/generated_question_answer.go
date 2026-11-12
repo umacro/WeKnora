@@ -26,6 +26,23 @@ func (r *chunkRepository) GetGeneratedQuestionAnswer(
 	return &answer, nil
 }
 
+// ListGeneratedQuestionAnswersByKnowledgeBase returns the saved answer
+// metadata needed to decorate a question list without invoking a model.
+func (r *chunkRepository) ListGeneratedQuestionAnswersByKnowledgeBase(
+	ctx context.Context, tenantID uint64, knowledgeBaseID string,
+) ([]*types.GeneratedQuestionAnswer, error) {
+	var answers []*types.GeneratedQuestionAnswer
+	err := r.db.WithContext(ctx).
+		Select("id", "tenant_id", "knowledge_base_id", "knowledge_id", "chunk_id", "question_id", "question_position", "question_revision", "question", "answer_status", "answer_model_id", "created_at").
+		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, knowledgeBaseID).
+		Order("created_at DESC").
+		Find(&answers).Error
+	if err != nil {
+		return nil, err
+	}
+	return answers, nil
+}
+
 // CreateGeneratedQuestionAnswerIfAbsent saves an answer once. The stable ID
 // makes concurrent requests idempotent and keeps answers for different source
 // revisions separate.

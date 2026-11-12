@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_generated_question_answers_kb_question;

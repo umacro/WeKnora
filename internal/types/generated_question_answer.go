@@ -7,13 +7,13 @@ import "time"
 // tenant, question identity, revision, question text, and source text hash.
 type GeneratedQuestionAnswer struct {
 	ID                   string    `gorm:"type:varchar(64);primaryKey"`
-	TenantID             uint64    `gorm:"not null;index:idx_generated_question_answers_chunk"`
-	KnowledgeBaseID      string    `gorm:"type:varchar(36);not null"`
+	TenantID             uint64    `gorm:"not null;index:idx_generated_question_answers_chunk;index:idx_generated_question_answers_kb_question,priority:1"`
+	KnowledgeBaseID      string    `gorm:"type:varchar(36);not null;index:idx_generated_question_answers_kb_question,priority:2"`
 	KnowledgeID          string    `gorm:"type:varchar(36);not null"`
-	ChunkID              string    `gorm:"type:varchar(36);not null;index:idx_generated_question_answers_chunk"`
+	ChunkID              string    `gorm:"type:varchar(36);not null;index:idx_generated_question_answers_chunk;index:idx_generated_question_answers_kb_question,priority:3"`
 	QuestionID           string    `gorm:"type:varchar(128);not null;default:''"`
 	QuestionPosition     int       `gorm:"not null"`
-	QuestionRevision     *int      `gorm:"default:null"`
+	QuestionRevision     *int      `gorm:"default:null;index:idx_generated_question_answers_kb_question,priority:4"`
 	Question             string    `gorm:"type:text;not null"`
 	SourceHash           string    `gorm:"type:varchar(64);not null"`
 	Answer               string    `gorm:"type:text;not null;default:''"`

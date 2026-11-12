@@ -17,6 +17,12 @@ type generatedQuestionAnswerStore interface {
 	CreateGeneratedQuestionAnswerIfAbsent(ctx context.Context, tenantID uint64, answer *types.GeneratedQuestionAnswer) error
 }
 
+type generatedQuestionAnswerListReader interface {
+	ListGeneratedQuestionAnswersByKnowledgeBase(
+		ctx context.Context, tenantID uint64, knowledgeBaseID string,
+	) ([]*types.GeneratedQuestionAnswer, error)
+}
+
 type generatedQuestionAnswerCacheEntry struct {
 	answer  string
 	status  string
@@ -33,6 +39,63 @@ type generatedQuestionAnswerIdentity struct {
 	QuestionRevision *int   `json:"question_revision"`
 	Question         string `json:"question"`
 	SourceHash       string `json:"source_hash"`
+}
+
+type generatedQuestionAnswerListIdentity struct {
+	KnowledgeBaseID  string `json:"knowledge_base_id"`
+	KnowledgeID      string `json:"knowledge_id"`
+	ChunkID          string `json:"chunk_id"`
+	QuestionID       string `json:"question_id"`
+	QuestionPosition int    `json:"question_position"`
+	QuestionRevision *int   `json:"question_revision"`
+	Question         string `json:"question"`
+}
+
+func generatedQuestionAnswerListKey(identity generatedQuestionAnswerListIdentity) string {
+	encoded, _ := json.Marshal(identity)
+	return string(encoded)
+}
+
+func applyGeneratedQuestionAnswerStates(items []generatedQuestionListItem, answers []*types.GeneratedQuestionAnswer) {
+	latestByQuestion := make(map[string]*types.GeneratedQuestionAnswer, len(answers))
+	for _, answer := range answers {
+		if answer == nil {
+			continue
+		}
+		key := generatedQuestionAnswerListKey(generatedQuestionAnswerListIdentity{
+			KnowledgeBaseID: answer.KnowledgeBaseID, KnowledgeID: answer.KnowledgeID,
+			ChunkID: answer.ChunkID, QuestionID: answer.QuestionID,
+			QuestionPosition: answer.QuestionPosition, QuestionRevision: answer.QuestionRevision,
+			Question: answer.Question,
+		})
+		if current := latestByQuestion[key]; current == nil || answer.CreatedAt.After(current.CreatedAt) {
+			latestByQuestion[key] = answer
+		}
+	}
+	for index := range items {
+		item := &items[index]
+		key := generatedQuestionAnswerListKey(generatedQuestionAnswerListIdentity{
+			KnowledgeBaseID: item.KnowledgeBaseID, KnowledgeID: item.KnowledgeID,
+			ChunkID: item.ChunkID, QuestionID: generatedQuestionStringValue(item.QuestionID),
+			QuestionPosition: item.QuestionPosition, QuestionRevision: item.QuestionRevision,
+			Question: item.Question,
+		})
+		answer := latestByQuestion[key]
+		if answer == nil {
+			item.AnswerState = "not_generated"
+			item.AnswerCreatedAt = nil
+			item.AnswerModelID = ""
+			continue
+		}
+		if answer.AnswerStatus == "answered" || answer.AnswerStatus == "not_found" {
+			item.AnswerState = answer.AnswerStatus
+		} else {
+			item.AnswerState = "not_generated"
+		}
+		createdAt := answer.CreatedAt
+		item.AnswerCreatedAt = &createdAt
+		item.AnswerModelID = answer.AnswerModelID
+	}
 }
 
 func generatedQuestionAnswerSourceHash(source string) string {

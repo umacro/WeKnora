@@ -738,6 +738,7 @@ export function regenerateGeneratedQuestions(chunkId: string) {
 
 export type GeneratedQuestionListFormat = 'list' | 'text' | 'csv' | 'json' | 'training_jsonl';
 export type GeneratedQuestionDuplicateMode = 'all' | 'duplicates' | 'unique';
+export type GeneratedQuestionAnswerState = 'all' | 'not_generated' | 'answered' | 'not_found';
 
 export interface GeneratedQuestionListItem {
   row_key: string;
@@ -753,6 +754,9 @@ export interface GeneratedQuestionListItem {
   question_position: number;
   generated_at: string | null;
   question_revision: number | null;
+  answer_state: Exclude<GeneratedQuestionAnswerState, 'all'>;
+  answer_created_at?: string | null;
+  answer_model_id?: string;
   current_chunk_revision: number;
   revision_state: 'current' | 'stale' | 'unknown';
   chunk_availability: 'available' | 'disabled';
@@ -773,6 +777,7 @@ export interface GeneratedQuestionListParams {
   sort_by?: 'chunk_index' | 'question_id';
   sort_order?: 'asc' | 'desc';
   duplicate_mode?: GeneratedQuestionDuplicateMode;
+  answer_state?: GeneratedQuestionAnswerState;
 }
 
 export interface GeneratedQuestionListResponse {
@@ -791,6 +796,9 @@ export interface GeneratedQuestionAnswerResponse {
     answer: string;
     answer_status: 'answered' | 'not_found' | 'source_unavailable' | 'missing_question';
     answer_model_id: string;
+    answer_cached?: boolean;
+    answer_record_id?: string;
+    answer_created_at?: string;
     source_revision_status: string;
     question_revision: number | null;
   };
@@ -810,6 +818,7 @@ export function extractGeneratedQuestionAnswer(
   return post<GeneratedQuestionAnswerResponse>(
     `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answer`,
     input,
+    { timeout: 300000 },
   );
 }
 

@@ -22,6 +22,8 @@
           :placeholder="$t('knowledgeEditor.wikiBrowser.generatedQuestionsChunkId')" @enter="applyFilters" />
         <t-select v-model="filters.duplicate_mode" :options="duplicateOptions"
           :placeholder="$t('knowledgeEditor.wikiBrowser.generatedQuestionsDuplicateMode')" />
+        <t-select v-model="filters.answer_state" :options="answerStateOptions"
+          :placeholder="$t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerState')" />
         <t-select v-model="filters.sort_by" :options="sortOptions"
           :placeholder="$t('knowledgeEditor.wikiBrowser.generatedQuestionsSortBy')" />
         <t-select v-model="filters.sort_order" :options="sortOrderOptions" />
@@ -55,6 +57,30 @@
             @click="downloadExport('training_jsonl')">
             {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsExportTrainingCorpus') }}
           </t-button>
+          <t-button theme="primary" :disabled="loading || total === 0 || answerBatch.running"
+            :loading="answerBatch.running" @click="generateFilteredAnswers">
+            {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerateFilteredAnswers') }}
+          </t-button>
+        </div>
+      </div>
+
+      <div v-if="answerBatch.running" class="generated-questions-answer-progress" role="status">
+        <div class="generated-questions-answer-progress-heading">
+          <span>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGeneratingAnswers', {
+            done: answerBatch.done, total: answerBatch.total || '…'
+          }) }}</span>
+          <t-button size="small" variant="text" @click="stopAnswerGeneration">
+            {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsStopGeneration') }}
+          </t-button>
+        </div>
+        <progress :max="Math.max(answerBatch.total, 1)" :value="answerBatch.done" />
+        <div class="generated-questions-answer-progress-counts">
+          {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
+            answered: answerBatch.answered,
+            notFound: answerBatch.notFound,
+            unavailable: answerBatch.unavailable,
+            failed: answerBatch.failed
+          }) }}
         </div>
       </div>
 
@@ -82,6 +108,7 @@
               <th>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsSource') }}</th>
               <th>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsChunk') }}</th>
               <th>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsStatus') }}</th>
+              <th>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerState') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -177,6 +204,19 @@
                 </t-tag>
                 <span v-if="row.index_status" class="index-status">{{ row.index_status }}</span>
               </td>
+              <td class="answer-status-cell">
+                <t-tag size="small" :theme="answerStateTheme(row.answer_state)" variant="light"
+                  :title="row.answer_created_at
+                    ? $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerGeneratedAt', {
+                      time: formatAnswerCreatedAt(row.answer_created_at)
+                    })
+                    : undefined">
+                  {{ answerStateLabel(row.answer_state) }}
+                </t-tag>
+                <div v-if="row.answer_created_at" class="answer-generated-at">
+                  {{ formatAnswerCreatedAt(row.answer_created_at) }}
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -200,6 +240,7 @@ import {
   getChunkByIdOnly,
   listChunkRevisions,
   listGeneratedQuestions,
+  type GeneratedQuestionAnswerState,
   type GeneratedQuestionDuplicateMode,
   type GeneratedQuestionListItem,
   type GeneratedQuestionListParams,
@@ -216,6 +257,7 @@ const { t } = useI18n()
 
 const filters = reactive<GeneratedQuestionListParams>({
   duplicate_mode: 'all',
+  answer_state: 'all',
   sort_by: 'chunk_index',
   sort_order: 'asc',
 })
@@ -230,6 +272,16 @@ const copying = ref(false)
 const copyingFiltered = ref(false)
 const exporting = ref(false)
 const errorMessage = ref('')
+const answerBatch = reactive({
+  running: false,
+  stopRequested: false,
+  total: 0,
+  done: 0,
+  answered: 0,
+  notFound: 0,
+  unavailable: 0,
+  failed: 0,
+})
 const expandedSources = reactive<Record<string, boolean>>({})
 const copyingRows = reactive<Record<string, boolean>>({})
 
@@ -263,6 +315,13 @@ const duplicateOptions = computed(() => [
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsDuplicates'), value: 'duplicates' },
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsUnique'), value: 'unique' },
 ] as Array<{ label: string; value: GeneratedQuestionDuplicateMode }>)
+
+const answerStateOptions = computed(() => [
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerAll'), value: 'all' },
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotGenerated'), value: 'not_generated' },
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerGenerated'), value: 'answered' },
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFoundState'), value: 'not_found' },
+] as Array<{ label: string; value: GeneratedQuestionAnswerState }>)
 
 const sortOptions = computed(() => [
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsSortChunkIndex'), value: 'chunk_index' },
@@ -337,6 +396,26 @@ function revisionLabel(state: GeneratedQuestionListItem['revision_state']) {
       ? 'generatedQuestionsStale'
       : 'generatedQuestionsUnknown'
   return t(`knowledgeEditor.wikiBrowser.${key}`)
+}
+
+function answerStateLabel(state: GeneratedQuestionListItem['answer_state']) {
+  const key = state === 'answered'
+    ? 'generatedQuestionsAnswerGenerated'
+    : state === 'not_found'
+      ? 'generatedQuestionsAnswerNotFoundState'
+      : 'generatedQuestionsAnswerNotGenerated'
+  return t(`knowledgeEditor.wikiBrowser.${key}`)
+}
+
+function answerStateTheme(state: GeneratedQuestionListItem['answer_state']) {
+  if (state === 'answered') return 'success'
+  if (state === 'not_found') return 'warning'
+  return 'default'
+}
+
+function formatAnswerCreatedAt(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 function sourceLine(row: GeneratedQuestionListItem) {
@@ -477,6 +556,11 @@ async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false)
       answerCache[row.row_key].answer = String(data?.answer || '')
       answerCache[row.row_key].status = String(data?.answer_status || 'source_unavailable')
       answerCache[row.row_key].modelId = String(data?.answer_model_id || '')
+      if (data?.answer_status === 'answered' || data?.answer_status === 'not_found') {
+        row.answer_state = data.answer_status
+        row.answer_created_at = data.answer_created_at || row.answer_created_at
+        row.answer_model_id = String(data?.answer_model_id || '')
+      }
       answerCache[row.row_key].loaded = true
     } catch {
       answerCache[row.row_key].error = true
@@ -492,6 +576,116 @@ async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false)
     if (answerLoadPromises.get(row.row_key) === request) {
       answerLoadPromises.delete(row.row_key)
     }
+  }
+}
+
+function stopAnswerGeneration() {
+  answerBatch.stopRequested = true
+}
+
+async function generateFilteredAnswers() {
+  if (answerBatch.running) return
+  if (filters.answer_state !== 'all' && filters.answer_state !== 'not_generated') {
+    MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
+    return
+  }
+
+  answerBatch.running = true
+  answerBatch.stopRequested = false
+  answerBatch.total = 0
+  answerBatch.done = 0
+  answerBatch.answered = 0
+  answerBatch.notFound = 0
+  answerBatch.unavailable = 0
+  answerBatch.failed = 0
+
+  try {
+    const pageSize = 100
+    const generationFilters = { ...filters, answer_state: 'not_generated' as const }
+    const firstResponse = await listGeneratedQuestions(props.kbId, {
+      ...generationFilters,
+      page: 1,
+      page_size: pageSize,
+    }) as any
+    const firstBody = firstResponse?.data && !Array.isArray(firstResponse.data)
+      ? firstResponse.data
+      : firstResponse
+    const targetCount = Number(firstBody?.total || 0)
+    answerBatch.total = targetCount
+    if (targetCount === 0) {
+      MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
+      return
+    }
+    if (targetCount > 5000) {
+      MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationLimit'))
+      return
+    }
+
+    const targets: GeneratedQuestionListItem[] = Array.isArray(firstBody?.data) ? [...firstBody.data] : []
+    const pageCount = Math.ceil(targetCount / pageSize)
+    for (let requestPage = 2; requestPage <= pageCount; requestPage++) {
+      const response = await listGeneratedQuestions(props.kbId, {
+        ...generationFilters,
+        page: requestPage,
+        page_size: pageSize,
+      }) as any
+      const body = response?.data && !Array.isArray(response.data) ? response.data : response
+      if (Array.isArray(body?.data)) targets.push(...body.data)
+    }
+    answerBatch.total = targets.length
+
+    let nextIndex = 0
+    const worker = async () => {
+      while (!answerBatch.stopRequested) {
+        const index = nextIndex++
+        if (index >= targets.length) return
+        const row = targets[index]
+        try {
+          const response = await extractGeneratedQuestionAnswer(props.kbId, {
+            chunk_id: row.chunk_id,
+            question_id: row.question_id,
+            question_position: row.question_position,
+          }) as any
+          const data = response?.data?.data ?? response?.data ?? response
+          const status = String(data?.answer_status || 'source_unavailable')
+          if (status === 'answered' || status === 'not_found') {
+            if (status === 'answered') answerBatch.answered++
+            else answerBatch.notFound++
+            row.answer_state = status
+            row.answer_created_at = data?.answer_created_at || null
+            row.answer_model_id = String(data?.answer_model_id || '')
+            const visibleRow = rows.value.find((visible) => visible.row_key === row.row_key)
+            if (visibleRow) {
+              visibleRow.answer_state = row.answer_state
+              visibleRow.answer_created_at = row.answer_created_at
+              visibleRow.answer_model_id = row.answer_model_id
+            }
+          } else {
+            answerBatch.unavailable++
+          }
+        } catch {
+          answerBatch.failed++
+        } finally {
+          answerBatch.done++
+        }
+      }
+    }
+
+    await Promise.all([worker(), worker(), worker()])
+    const summary = t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
+      answered: answerBatch.answered,
+      notFound: answerBatch.notFound,
+      unavailable: answerBatch.unavailable,
+      failed: answerBatch.failed,
+    })
+    if (answerBatch.failed > 0) MessagePlugin.error(summary)
+    else MessagePlugin.success(summary)
+  } catch {
+    MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
+  } finally {
+    answerBatch.running = false
+    answerBatch.total = Math.max(answerBatch.total, answerBatch.done)
+    await loadPage(page.value)
   }
 }
 
@@ -657,6 +851,36 @@ async function downloadExport(format: 'csv' | 'json' | 'training_jsonl') {
   font-size: 13px;
 }
 
+.generated-questions-answer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--td-brand-color-2);
+  border-radius: 6px;
+  background: var(--td-brand-color-1);
+}
+
+.generated-questions-answer-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.generated-questions-answer-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--td-brand-color);
+}
+
+.generated-questions-answer-progress-counts,
+.answer-generated-at {
+  color: var(--td-text-color-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .generated-questions-warning,
 .generated-questions-error {
   padding: 10px 12px;
@@ -715,10 +939,11 @@ async function downloadExport(format: 'csv' | 'json' | 'training_jsonl') {
   font-weight: 600;
 }
 
-.generated-questions-table th:nth-child(1) { width: 42%; }
-.generated-questions-table th:nth-child(2) { width: 22%; }
-.generated-questions-table th:nth-child(3) { width: 19%; }
-.generated-questions-table th:nth-child(4) { width: 17%; }
+.generated-questions-table th:nth-child(1) { width: 34%; }
+.generated-questions-table th:nth-child(2) { width: 19%; }
+.generated-questions-table th:nth-child(3) { width: 16%; }
+.generated-questions-table th:nth-child(4) { width: 16%; }
+.generated-questions-table th:nth-child(5) { width: 15%; }
 
 .question-text {
   white-space: pre-wrap;

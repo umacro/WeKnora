@@ -32,28 +32,31 @@ const (
 )
 
 type generatedQuestionListItem struct {
-	RowKey               string  `json:"row_key"`
-	QuestionID           *string `json:"question_id"`
-	Question             string  `json:"question"`
-	KnowledgeBaseID      string  `json:"knowledge_base_id"`
-	WikiID               *string `json:"wiki_id"`
-	KnowledgeID          string  `json:"knowledge_id"`
-	KnowledgeTitle       *string `json:"knowledge_title"`
-	TaskID               *string `json:"task_id"`
-	ChunkID              string  `json:"chunk_id"`
-	ChunkIndex           int     `json:"chunk_index"`
-	QuestionPosition     int     `json:"question_position"`
-	GeneratedAt          *string `json:"generated_at"`
-	QuestionRevision     *int    `json:"question_revision"`
-	CurrentChunkRevision int     `json:"current_chunk_revision"`
-	RevisionState        string  `json:"revision_state"`
-	ChunkAvailability    string  `json:"chunk_availability"`
-	IndexStatus          string  `json:"index_status"`
-	TaskState            string  `json:"task_state"`
-	QuestionDataState    string  `json:"question_data_state"`
-	IsDuplicate          bool    `json:"is_duplicate"`
-	DuplicateGroupKey    *string `json:"duplicate_group_key"`
-	DuplicateCount       int     `json:"duplicate_count"`
+	RowKey               string     `json:"row_key"`
+	QuestionID           *string    `json:"question_id"`
+	Question             string     `json:"question"`
+	KnowledgeBaseID      string     `json:"knowledge_base_id"`
+	WikiID               *string    `json:"wiki_id"`
+	KnowledgeID          string     `json:"knowledge_id"`
+	KnowledgeTitle       *string    `json:"knowledge_title"`
+	TaskID               *string    `json:"task_id"`
+	ChunkID              string     `json:"chunk_id"`
+	ChunkIndex           int        `json:"chunk_index"`
+	QuestionPosition     int        `json:"question_position"`
+	GeneratedAt          *string    `json:"generated_at"`
+	QuestionRevision     *int       `json:"question_revision"`
+	AnswerState          string     `json:"answer_state"`
+	AnswerCreatedAt      *time.Time `json:"answer_created_at,omitempty"`
+	AnswerModelID        string     `json:"answer_model_id,omitempty"`
+	CurrentChunkRevision int        `json:"current_chunk_revision"`
+	RevisionState        string     `json:"revision_state"`
+	ChunkAvailability    string     `json:"chunk_availability"`
+	IndexStatus          string     `json:"index_status"`
+	TaskState            string     `json:"task_state"`
+	QuestionDataState    string     `json:"question_data_state"`
+	IsDuplicate          bool       `json:"is_duplicate"`
+	DuplicateGroupKey    *string    `json:"duplicate_group_key"`
+	DuplicateCount       int        `json:"duplicate_count"`
 }
 
 type generatedQuestionListQuery struct {
@@ -65,6 +68,7 @@ type generatedQuestionListQuery struct {
 	SortBy        string
 	SortOrder     string
 	DuplicateMode string
+	AnswerState   string
 	Format        string
 }
 
@@ -153,6 +157,15 @@ func (h *ChunkHandler) ListGeneratedQuestions(c *gin.Context) {
 	}
 
 	items, warnings := collectGeneratedQuestionItems(kbID, chunks, knowledgeTitles)
+	if answerReader, ok := h.service.GetRepository().(generatedQuestionAnswerListReader); ok {
+		answers, listErr := answerReader.ListGeneratedQuestionAnswersByKnowledgeBase(ctx, tenantID, kbID)
+		if listErr != nil {
+			logger.ErrorWithFields(ctx, listErr, map[string]interface{}{"knowledge_base_id": kbID})
+			c.Error(errors.NewInternalServerError("Failed to read generated question answer status"))
+			return
+		}
+		applyGeneratedQuestionAnswerStates(items, answers)
+	}
 	filtered := filterGeneratedQuestionItems(items, query)
 	rawTotal := len(filtered)
 	assignGeneratedQuestionDuplicates(kbID, filtered)
@@ -222,6 +235,14 @@ func parseGeneratedQuestionListQuery(c *gin.Context) (generatedQuestionListQuery
 	query.KnowledgeID = strings.TrimSpace(c.Query("knowledge_id"))
 	query.ChunkID = strings.TrimSpace(c.Query("chunk_id"))
 	query.Keyword = strings.TrimSpace(c.Query("keyword"))
+	query.AnswerState = strings.TrimSpace(c.Query("answer_state"))
+	if query.AnswerState == "" {
+		query.AnswerState = "all"
+	}
+	if query.AnswerState != "all" && query.AnswerState != "not_generated" &&
+		query.AnswerState != "answered" && query.AnswerState != "not_found" {
+		return query, fmt.Errorf("answer_state must be all, not_generated, answered, or not_found")
+	}
 	if len(query.KnowledgeID) > 128 || len(query.ChunkID) > 128 {
 		return query, fmt.Errorf("knowledge_id and chunk_id must be at most 128 characters")
 	}
@@ -333,6 +354,7 @@ func collectGeneratedQuestionItems(kbID string, chunks []*types.Chunk, knowledge
 				ChunkIndex:           chunk.ChunkIndex,
 				QuestionPosition:     position + 1,
 				QuestionRevision:     questionRevision,
+				AnswerState:          "not_generated",
 				CurrentChunkRevision: chunk.ContentRevision,
 				RevisionState:        revisionState,
 				ChunkAvailability:    availability,
@@ -349,6 +371,9 @@ func filterGeneratedQuestionItems(items []generatedQuestionListItem, query gener
 	filtered := make([]generatedQuestionListItem, 0, len(items))
 	keyword := foldedQuestionText(query.Keyword)
 	for _, item := range items {
+		if query.AnswerState != "all" && item.AnswerState != query.AnswerState {
+			continue
+		}
 		if query.KnowledgeID != "" && item.KnowledgeID != query.KnowledgeID {
 			continue
 		}
