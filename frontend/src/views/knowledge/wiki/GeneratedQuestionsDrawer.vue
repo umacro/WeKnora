@@ -77,7 +77,8 @@
         <div class="generated-questions-answer-progress-counts">
           {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
             answered: answerBatch.answered,
-            notFound: answerBatch.notFound,
+            partial: answerBatch.partialEvidence,
+            insufficient: answerBatch.insufficient,
             unavailable: answerBatch.unavailable,
             failed: answerBatch.failed
           }) }}
@@ -170,9 +171,7 @@
                       <div v-else-if="answerCache[row.row_key]?.loaded">
                         <pre v-if="answerCache[row.row_key]?.answer" class="source-answer-text">{{ answerCache[row.row_key].answer }}</pre>
                         <div v-else class="source-original-empty">
-                          {{ answerCache[row.row_key]?.status === 'not_found'
-                            ? $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFound')
-                            : $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable') }}
+                          {{ answerEmptyMessage(answerCache[row.row_key]?.status || '') }}
                         </div>
                       </div>
                     </div>
@@ -206,15 +205,15 @@
               </td>
               <td class="answer-status-cell">
                 <t-tag size="small" :theme="answerStateTheme(row.answer_state)" variant="light"
-                  :title="row.answer_created_at
+                  :title="(row.answer_updated_at || row.answer_created_at)
                     ? $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerGeneratedAt', {
-                      time: formatAnswerCreatedAt(row.answer_created_at)
+                      time: formatAnswerCreatedAt(row.answer_updated_at || row.answer_created_at || '')
                     })
                     : undefined">
                   {{ answerStateLabel(row.answer_state) }}
                 </t-tag>
-                <div v-if="row.answer_created_at" class="answer-generated-at">
-                  {{ formatAnswerCreatedAt(row.answer_created_at) }}
+                <div v-if="row.answer_updated_at || row.answer_created_at" class="answer-generated-at">
+                  {{ formatAnswerCreatedAt(row.answer_updated_at || row.answer_created_at || '') }}
                 </div>
               </td>
             </tr>
@@ -278,7 +277,8 @@ const answerBatch = reactive({
   total: 0,
   done: 0,
   answered: 0,
-  notFound: 0,
+  partialEvidence: 0,
+  insufficient: 0,
   unavailable: 0,
   failed: 0,
 })
@@ -320,6 +320,8 @@ const answerStateOptions = computed(() => [
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerAll'), value: 'all' },
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotGenerated'), value: 'not_generated' },
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerGenerated'), value: 'answered' },
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerPartial'), value: 'partial_evidence' },
+  { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerInsufficient'), value: 'insufficient_source' },
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFoundState'), value: 'not_found' },
 ] as Array<{ label: string; value: GeneratedQuestionAnswerState }>)
 
@@ -401,16 +403,31 @@ function revisionLabel(state: GeneratedQuestionListItem['revision_state']) {
 function answerStateLabel(state: GeneratedQuestionListItem['answer_state']) {
   const key = state === 'answered'
     ? 'generatedQuestionsAnswerGenerated'
-    : state === 'not_found'
-      ? 'generatedQuestionsAnswerNotFoundState'
-      : 'generatedQuestionsAnswerNotGenerated'
+    : state === 'partial_evidence'
+      ? 'generatedQuestionsAnswerPartial'
+      : state === 'insufficient_source'
+        ? 'generatedQuestionsAnswerInsufficient'
+        : state === 'not_found'
+          ? 'generatedQuestionsAnswerNotFoundState'
+          : 'generatedQuestionsAnswerNotGenerated'
   return t(`knowledgeEditor.wikiBrowser.${key}`)
 }
 
 function answerStateTheme(state: GeneratedQuestionListItem['answer_state']) {
   if (state === 'answered') return 'success'
-  if (state === 'not_found') return 'warning'
+  if (state === 'partial_evidence' || state === 'insufficient_source' || state === 'not_found') return 'warning'
   return 'default'
+}
+
+function answerEmptyMessage(status: string) {
+  if (status === 'insufficient_source') {
+    return t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerInsufficient')
+  }
+  if (status === 'not_found') return t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFound')
+  if (status === 'partial_evidence') {
+    return t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerPartial')
+  }
+  return t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable')
 }
 
 function formatAnswerCreatedAt(value: string) {
@@ -556,9 +573,10 @@ async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false)
       answerCache[row.row_key].answer = String(data?.answer || '')
       answerCache[row.row_key].status = String(data?.answer_status || 'source_unavailable')
       answerCache[row.row_key].modelId = String(data?.answer_model_id || '')
-      if (data?.answer_status === 'answered' || data?.answer_status === 'not_found') {
-        row.answer_state = data.answer_status
+      if (['answered', 'partial_evidence', 'insufficient_source', 'not_found'].includes(data?.answer_status)) {
+        row.answer_state = data.answer_status === 'not_found' ? 'insufficient_source' : data.answer_status
         row.answer_created_at = data.answer_created_at || row.answer_created_at
+        row.answer_updated_at = data.answer_updated_at || row.answer_updated_at
         row.answer_model_id = String(data?.answer_model_id || '')
       }
       answerCache[row.row_key].loaded = true
@@ -585,79 +603,101 @@ function stopAnswerGeneration() {
 
 async function generateFilteredAnswers() {
   if (answerBatch.running) return
-  if (filters.answer_state !== 'all' && filters.answer_state !== 'not_generated') {
-    MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
-    return
-  }
 
   answerBatch.running = true
   answerBatch.stopRequested = false
   answerBatch.total = 0
   answerBatch.done = 0
   answerBatch.answered = 0
-  answerBatch.notFound = 0
+  answerBatch.partialEvidence = 0
+  answerBatch.insufficient = 0
   answerBatch.unavailable = 0
   answerBatch.failed = 0
 
   try {
     const pageSize = 100
-    const generationFilters = { ...filters, answer_state: 'not_generated' as const }
-    const firstResponse = await listGeneratedQuestions(props.kbId, {
-      ...generationFilters,
-      page: 1,
-      page_size: pageSize,
-    }) as any
-    const firstBody = firstResponse?.data && !Array.isArray(firstResponse.data)
-      ? firstResponse.data
-      : firstResponse
-    const targetCount = Number(firstBody?.total || 0)
-    answerBatch.total = targetCount
-    if (targetCount === 0) {
+    const selectedState = filters.answer_state || 'all'
+    const targetStates: GeneratedQuestionAnswerState[] = selectedState === 'all'
+      ? ['not_generated', 'not_found', 'partial_evidence', 'insufficient_source']
+      : selectedState === 'answered' ? [] : [selectedState]
+    const targets: GeneratedQuestionListItem[] = []
+
+    for (const targetState of targetStates) {
+      const generationFilters = { ...filters, answer_state: targetState }
+      const firstResponse = await listGeneratedQuestions(props.kbId, {
+        ...generationFilters,
+        page: 1,
+        page_size: pageSize,
+      }) as any
+      const firstBody = firstResponse?.data && !Array.isArray(firstResponse.data)
+        ? firstResponse.data
+        : firstResponse
+      const targetCount = Number(firstBody?.total || 0)
+      if (targetCount + targets.length > 5000) {
+        MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationLimit'))
+        return
+      }
+      if (Array.isArray(firstBody?.data)) targets.push(...firstBody.data)
+
+      const pageCount = Math.ceil(targetCount / pageSize)
+      for (let requestPage = 2; requestPage <= pageCount; requestPage++) {
+        const response = await listGeneratedQuestions(props.kbId, {
+          ...generationFilters,
+          page: requestPage,
+          page_size: pageSize,
+        }) as any
+        const body = response?.data && !Array.isArray(response.data) ? response.data : response
+        if (Array.isArray(body?.data)) targets.push(...body.data)
+      }
+    }
+
+    const targetMap = new Map<string, GeneratedQuestionListItem>()
+    targets.forEach((row) => targetMap.set(row.row_key, row))
+    const uniqueTargets = [...targetMap.values()]
+    answerBatch.total = uniqueTargets.length
+    if (uniqueTargets.length === 0) {
       MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
       return
     }
-    if (targetCount > 5000) {
-      MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationLimit'))
-      return
-    }
-
-    const targets: GeneratedQuestionListItem[] = Array.isArray(firstBody?.data) ? [...firstBody.data] : []
-    const pageCount = Math.ceil(targetCount / pageSize)
-    for (let requestPage = 2; requestPage <= pageCount; requestPage++) {
-      const response = await listGeneratedQuestions(props.kbId, {
-        ...generationFilters,
-        page: requestPage,
-        page_size: pageSize,
-      }) as any
-      const body = response?.data && !Array.isArray(response.data) ? response.data : response
-      if (Array.isArray(body?.data)) targets.push(...body.data)
-    }
-    answerBatch.total = targets.length
 
     let nextIndex = 0
     const worker = async () => {
       while (!answerBatch.stopRequested) {
         const index = nextIndex++
-        if (index >= targets.length) return
-        const row = targets[index]
+        if (index >= uniqueTargets.length) return
+        const row = uniqueTargets[index]
         try {
           const response = await extractGeneratedQuestionAnswer(props.kbId, {
             chunk_id: row.chunk_id,
             question_id: row.question_id,
             question_position: row.question_position,
+            force_reanalysis: row.answer_state !== 'not_generated',
           }) as any
           const data = response?.data?.data ?? response?.data ?? response
           const status = String(data?.answer_status || 'source_unavailable')
-          if (status === 'answered' || status === 'not_found') {
-            if (status === 'answered') answerBatch.answered++
-            else answerBatch.notFound++
-            row.answer_state = status
+          if (status === 'answered' || status === 'partial_evidence'
+            || status === 'insufficient_source' || status === 'not_found') {
+            const normalizedStatus = status === 'not_found' ? 'insufficient_source' : status
+            if (normalizedStatus === 'answered') answerBatch.answered++
+            else if (normalizedStatus === 'partial_evidence') answerBatch.partialEvidence++
+            else answerBatch.insufficient++
+            row.answer_state = normalizedStatus
             row.answer_created_at = data?.answer_created_at || null
+            row.answer_updated_at = data?.answer_updated_at || row.answer_created_at
             row.answer_model_id = String(data?.answer_model_id || '')
+            answerCache[row.row_key] = {
+              loading: false,
+              loaded: true,
+              error: false,
+              answer: String(data?.answer || ''),
+              status: normalizedStatus,
+              modelId: row.answer_model_id,
+            }
             const visibleRow = rows.value.find((visible) => visible.row_key === row.row_key)
             if (visibleRow) {
               visibleRow.answer_state = row.answer_state
               visibleRow.answer_created_at = row.answer_created_at
+              visibleRow.answer_updated_at = row.answer_updated_at
               visibleRow.answer_model_id = row.answer_model_id
             }
           } else {
@@ -674,7 +714,8 @@ async function generateFilteredAnswers() {
     await Promise.all([worker(), worker(), worker()])
     const summary = t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
       answered: answerBatch.answered,
-      notFound: answerBatch.notFound,
+      partial: answerBatch.partialEvidence,
+      insufficient: answerBatch.insufficient,
       unavailable: answerBatch.unavailable,
       failed: answerBatch.failed,
     })
@@ -725,9 +766,7 @@ async function copyQuestionAndSource(row: GeneratedQuestionListItem) {
     ].join('; ')
     const text = [
       `${t('knowledgeEditor.wikiBrowser.generatedQuestionsQuestion')}:\n${row.question || t('knowledgeEditor.wikiBrowser.generatedQuestionsMissingText')}`,
-      `${t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswer')}:\n${answer.answer || (answer.status === 'not_found'
-        ? t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFound')
-        : t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable'))}`,
+      `${t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswer')}:\n${answer.answer || answerEmptyMessage(answer.status)}`,
       `${t('knowledgeEditor.wikiBrowser.generatedQuestionsSource')}:\n${sourceRevisionLabel(row)}\n\n${sourceContent}`,
       `[${trace}]`,
     ].join('\n\n')

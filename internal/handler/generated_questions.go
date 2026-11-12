@@ -47,6 +47,7 @@ type generatedQuestionListItem struct {
 	QuestionRevision     *int       `json:"question_revision"`
 	AnswerState          string     `json:"answer_state"`
 	AnswerCreatedAt      *time.Time `json:"answer_created_at,omitempty"`
+	AnswerUpdatedAt      *time.Time `json:"answer_updated_at,omitempty"`
 	AnswerModelID        string     `json:"answer_model_id,omitempty"`
 	CurrentChunkRevision int        `json:"current_chunk_revision"`
 	RevisionState        string     `json:"revision_state"`
@@ -102,6 +103,7 @@ type generatedQuestionTrainingMetadata struct {
 	AnswerModelID        string     `json:"answer_model_id,omitempty"`
 	AnswerRecordID       string     `json:"answer_record_id,omitempty"`
 	AnswerCreatedAt      *time.Time `json:"answer_created_at,omitempty"`
+	AnswerUpdatedAt      *time.Time `json:"answer_updated_at,omitempty"`
 }
 
 // ListGeneratedQuestions returns the questions still stored in readable
@@ -240,8 +242,11 @@ func parseGeneratedQuestionListQuery(c *gin.Context) (generatedQuestionListQuery
 		query.AnswerState = "all"
 	}
 	if query.AnswerState != "all" && query.AnswerState != "not_generated" &&
-		query.AnswerState != "answered" && query.AnswerState != "not_found" {
-		return query, fmt.Errorf("answer_state must be all, not_generated, answered, or not_found")
+		query.AnswerState != types.GeneratedQuestionAnswerStatusAnswered &&
+		query.AnswerState != types.GeneratedQuestionAnswerStatusPartialEvidence &&
+		query.AnswerState != types.GeneratedQuestionAnswerStatusInsufficientSource &&
+		query.AnswerState != types.GeneratedQuestionAnswerStatusLegacyNotFound {
+		return query, fmt.Errorf("answer_state must be all, not_generated, answered, partial_evidence, insufficient_source, or not_found")
 	}
 	if len(query.KnowledgeID) > 128 || len(query.ChunkID) > 128 {
 		return query, fmt.Errorf("knowledge_id and chunk_id must be at most 128 characters")
@@ -561,7 +566,7 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 			}
 			answerRecord, _, err := h.getOrGenerateGeneratedQuestionAnswer(
 				c.Request.Context(), item, record.PositivePassage, sourceStatus,
-				answerCache,
+				answerCache, false,
 			)
 			if err != nil {
 				logger.ErrorWithFields(c.Request.Context(), err, map[string]interface{}{
@@ -576,11 +581,14 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 			record.Metadata.AnswerModelID = answerRecord.AnswerModelID
 			record.Metadata.AnswerRecordID = answerRecord.ID
 			record.Metadata.AnswerCreatedAt = &answerRecord.CreatedAt
-			if answerRecord.AnswerStatus == "not_found" {
-				record.AnswerStatus = "not_found"
-				reasons = append(reasons, "answer_not_found")
-			} else {
-				record.AnswerStatus = "answered"
+			record.Metadata.AnswerUpdatedAt = &answerRecord.UpdatedAt
+			record.AnswerStatus = answerRecord.AnswerStatus
+			switch answerRecord.AnswerStatus {
+			case types.GeneratedQuestionAnswerStatusPartialEvidence:
+				reasons = append(reasons, "answer_partial_evidence")
+			case types.GeneratedQuestionAnswerStatusInsufficientSource,
+				types.GeneratedQuestionAnswerStatusLegacyNotFound:
+				reasons = append(reasons, "answer_insufficient_source")
 			}
 		}
 		record.SourceRevisionStatus = sourceStatus

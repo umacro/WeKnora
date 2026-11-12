@@ -15,14 +15,15 @@ type generatedQuestionAnswerRequest struct {
 	ChunkID          string `json:"chunk_id"`
 	QuestionID       string `json:"question_id"`
 	QuestionPosition int    `json:"question_position"`
+	ForceReanalysis  bool   `json:"force_reanalysis,omitempty"`
 }
 
 type generatedQuestionAnswerExtractor interface {
-	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, question, source string) (string, string, error)
+	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, question, source string) (types.GeneratedQuestionAnswerExtraction, string, error)
 }
 
 type generatedQuestionAnswerKnowledgeExtractor interface {
-	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, knowledgeID, question, source string) (string, string, error)
+	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, knowledgeID, question, source string) (types.GeneratedQuestionAnswerExtraction, string, error)
 }
 
 func supportsGeneratedQuestionAnswerExtraction(service interface{}) bool {
@@ -35,7 +36,7 @@ func supportsGeneratedQuestionAnswerExtraction(service interface{}) bool {
 
 func extractGeneratedQuestionAnswer(
 	service interface{}, ctx context.Context, item generatedQuestionListItem, source string,
-) (string, string, error) {
+) (types.GeneratedQuestionAnswerExtraction, string, error) {
 	if extractor, ok := service.(generatedQuestionAnswerKnowledgeExtractor); ok {
 		return extractor.ExtractGeneratedQuestionAnswer(
 			ctx, item.KnowledgeBaseID, item.KnowledgeID, item.Question, source,
@@ -44,7 +45,7 @@ func extractGeneratedQuestionAnswer(
 	if extractor, ok := service.(generatedQuestionAnswerExtractor); ok {
 		return extractor.ExtractGeneratedQuestionAnswer(ctx, item.KnowledgeBaseID, item.Question, source)
 	}
-	return "", "", errors.NewServiceUnavailableError("Question answer extraction is unavailable")
+	return types.GeneratedQuestionAnswerExtraction{}, "", errors.NewServiceUnavailableError("Question answer extraction is unavailable")
 }
 
 type generatedQuestionSourceResolver struct {
@@ -180,7 +181,7 @@ func (h *ChunkHandler) AnswerGeneratedQuestion(c *gin.Context) {
 			return
 		}
 		answerRecord, answerCached, err = h.getOrGenerateGeneratedQuestionAnswer(
-			ctx, *item, passage, sourceStatus, nil,
+			ctx, *item, passage, sourceStatus, nil, request.ForceReanalysis,
 		)
 		if err != nil {
 			logger.ErrorWithFields(ctx, err, map[string]interface{}{
@@ -206,6 +207,7 @@ func (h *ChunkHandler) AnswerGeneratedQuestion(c *gin.Context) {
 	if answerRecord != nil {
 		data["answer_record_id"] = answerRecord.ID
 		data["answer_created_at"] = answerRecord.CreatedAt
+		data["answer_updated_at"] = answerRecord.UpdatedAt
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

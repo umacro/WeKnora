@@ -2,6 +2,20 @@ package types
 
 import "time"
 
+const (
+	GeneratedQuestionAnswerStatusAnswered           = "answered"
+	GeneratedQuestionAnswerStatusPartialEvidence    = "partial_evidence"
+	GeneratedQuestionAnswerStatusInsufficientSource = "insufficient_source"
+	GeneratedQuestionAnswerStatusLegacyNotFound     = "not_found"
+)
+
+// GeneratedQuestionAnswerExtraction is the model's source-grounded result.
+// Partial answers contain only claims explicitly supported by the passage.
+type GeneratedQuestionAnswerExtraction struct {
+	Answer string `json:"answer"`
+	Status string `json:"status"`
+}
+
 // GeneratedQuestionAnswer stores an answer extracted from the exact source
 // revision associated with a generated question. ID is a stable hash of the
 // tenant, question identity, revision, question text, and source text hash.

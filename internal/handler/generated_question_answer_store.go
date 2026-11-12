@@ -14,7 +14,7 @@ import (
 
 type generatedQuestionAnswerStore interface {
 	GetGeneratedQuestionAnswer(ctx context.Context, tenantID uint64, id string) (*types.GeneratedQuestionAnswer, error)
-	CreateGeneratedQuestionAnswerIfAbsent(ctx context.Context, tenantID uint64, answer *types.GeneratedQuestionAnswer) error
+	UpsertGeneratedQuestionAnswer(ctx context.Context, tenantID uint64, answer *types.GeneratedQuestionAnswer) error
 }
 
 type generatedQuestionAnswerListReader interface {
@@ -68,7 +68,7 @@ func applyGeneratedQuestionAnswerStates(items []generatedQuestionListItem, answe
 			QuestionPosition: answer.QuestionPosition, QuestionRevision: answer.QuestionRevision,
 			Question: answer.Question,
 		})
-		if current := latestByQuestion[key]; current == nil || answer.CreatedAt.After(current.CreatedAt) {
+		if current := latestByQuestion[key]; current == nil || answer.UpdatedAt.After(current.UpdatedAt) {
 			latestByQuestion[key] = answer
 		}
 	}
@@ -84,16 +84,23 @@ func applyGeneratedQuestionAnswerStates(items []generatedQuestionListItem, answe
 		if answer == nil {
 			item.AnswerState = "not_generated"
 			item.AnswerCreatedAt = nil
+			item.AnswerUpdatedAt = nil
 			item.AnswerModelID = ""
 			continue
 		}
-		if answer.AnswerStatus == "answered" || answer.AnswerStatus == "not_found" {
+		switch answer.AnswerStatus {
+		case types.GeneratedQuestionAnswerStatusAnswered,
+			types.GeneratedQuestionAnswerStatusPartialEvidence,
+			types.GeneratedQuestionAnswerStatusInsufficientSource,
+			types.GeneratedQuestionAnswerStatusLegacyNotFound:
 			item.AnswerState = answer.AnswerStatus
-		} else {
+		default:
 			item.AnswerState = "not_generated"
 		}
 		createdAt := answer.CreatedAt
+		updatedAt := answer.UpdatedAt
 		item.AnswerCreatedAt = &createdAt
+		item.AnswerUpdatedAt = &updatedAt
 		item.AnswerModelID = answer.AnswerModelID
 	}
 }
@@ -124,14 +131,15 @@ func generatedQuestionAnswerReuseKey(item generatedQuestionListItem, sourceHash 
 }
 
 // getOrGenerateGeneratedQuestionAnswer reuses an answer saved for this exact
-// question and source revision. Missing answers are extracted once, then
-// persisted before they are returned to the caller.
+// question and source revision unless an unresolved result is explicitly
+// reanalyzed. New and refreshed results are persisted before they are returned.
 func (h *ChunkHandler) getOrGenerateGeneratedQuestionAnswer(
 	ctx context.Context,
 	item generatedQuestionListItem,
 	source string,
 	sourceRevisionStatus string,
 	requestCache map[string]generatedQuestionAnswerCacheEntry,
+	forceReanalysis bool,
 ) (*types.GeneratedQuestionAnswer, bool, error) {
 	if strings.TrimSpace(source) == "" {
 		return nil, false, fmt.Errorf("source passage is required")
@@ -165,7 +173,7 @@ func (h *ChunkHandler) getOrGenerateGeneratedQuestionAnswer(
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to read saved generated question answer: %w", err)
 	}
-	if saved != nil {
+	if saved != nil && (!forceReanalysis || saved.AnswerStatus == types.GeneratedQuestionAnswerStatusAnswered) {
 		if requestCache != nil {
 			requestCache[generatedQuestionAnswerReuseKey(item, sourceHash)] = generatedQuestionAnswerCacheEntry{
 				answer: saved.Answer, status: saved.AnswerStatus, modelID: saved.AnswerModelID,
@@ -176,17 +184,24 @@ func (h *ChunkHandler) getOrGenerateGeneratedQuestionAnswer(
 
 	reuseKey := generatedQuestionAnswerReuseKey(item, sourceHash)
 	entry, foundInRequest := requestCache[reuseKey]
+	if forceReanalysis {
+		foundInRequest = false
+		entry = generatedQuestionAnswerCacheEntry{}
+	}
 	if !foundInRequest {
-		answer, modelID, extractErr := extractGeneratedQuestionAnswer(h.service, ctx, item, source)
+		result, modelID, extractErr := extractGeneratedQuestionAnswer(h.service, ctx, item, source)
 		if extractErr != nil {
 			return nil, false, extractErr
 		}
-		entry.answer = strings.TrimSpace(answer)
+		entry.answer = strings.TrimSpace(result.Answer)
 		entry.modelID = modelID
-		if entry.answer == "" {
-			entry.status = "not_found"
-		} else {
-			entry.status = "answered"
+		entry.status = result.Status
+		if entry.status == "" {
+			if entry.answer == "" {
+				entry.status = types.GeneratedQuestionAnswerStatusInsufficientSource
+			} else {
+				entry.status = types.GeneratedQuestionAnswerStatusAnswered
+			}
 		}
 	}
 
@@ -200,11 +215,11 @@ func (h *ChunkHandler) getOrGenerateGeneratedQuestionAnswer(
 		AnswerStatus: entry.status, AnswerModelID: entry.modelID,
 		SourceRevisionStatus: sourceRevisionStatus, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := store.CreateGeneratedQuestionAnswerIfAbsent(ctx, tenantID, answer); err != nil {
+	if err := store.UpsertGeneratedQuestionAnswer(ctx, tenantID, answer); err != nil {
 		return nil, false, fmt.Errorf("failed to save generated question answer: %w", err)
 	}
-	// A concurrent request may have inserted this identity first. Read back the
-	// canonical row so the response always reflects what was actually saved.
+	// Read back the canonical row so the response reflects the persisted result,
+	// including any concurrent update for this exact question/source identity.
 	saved, err = store.GetGeneratedQuestionAnswer(ctx, tenantID, recordID)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to confirm saved generated question answer: %w", err)

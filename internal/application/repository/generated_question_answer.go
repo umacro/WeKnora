@@ -33,9 +33,9 @@ func (r *chunkRepository) ListGeneratedQuestionAnswersByKnowledgeBase(
 ) ([]*types.GeneratedQuestionAnswer, error) {
 	var answers []*types.GeneratedQuestionAnswer
 	err := r.db.WithContext(ctx).
-		Select("id", "tenant_id", "knowledge_base_id", "knowledge_id", "chunk_id", "question_id", "question_position", "question_revision", "question", "answer_status", "answer_model_id", "created_at").
+		Select("id", "tenant_id", "knowledge_base_id", "knowledge_id", "chunk_id", "question_id", "question_position", "question_revision", "question", "answer_status", "answer_model_id", "created_at", "updated_at").
 		Where("tenant_id = ? AND knowledge_base_id = ?", tenantID, knowledgeBaseID).
-		Order("created_at DESC").
+		Order("updated_at DESC").
 		Find(&answers).Error
 	if err != nil {
 		return nil, err
@@ -43,10 +43,9 @@ func (r *chunkRepository) ListGeneratedQuestionAnswersByKnowledgeBase(
 	return answers, nil
 }
 
-// CreateGeneratedQuestionAnswerIfAbsent saves an answer once. The stable ID
-// makes concurrent requests idempotent and keeps answers for different source
-// revisions separate.
-func (r *chunkRepository) CreateGeneratedQuestionAnswerIfAbsent(
+// UpsertGeneratedQuestionAnswer creates the first answer or refreshes its
+// result for the same stable question/source identity after explicit reanalysis.
+func (r *chunkRepository) UpsertGeneratedQuestionAnswer(
 	ctx context.Context, tenantID uint64, answer *types.GeneratedQuestionAnswer,
 ) error {
 	if answer == nil || answer.TenantID != tenantID || answer.ID == "" {
@@ -54,8 +53,10 @@ func (r *chunkRepository) CreateGeneratedQuestionAnswerIfAbsent(
 	}
 	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoNothing: true,
+			Columns: []clause.Column{{Name: "id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"answer", "answer_status", "answer_model_id", "source_revision_status", "updated_at",
+			}),
 		}).
 		Create(answer).Error
 }

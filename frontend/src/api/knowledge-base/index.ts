@@ -738,7 +738,13 @@ export function regenerateGeneratedQuestions(chunkId: string) {
 
 export type GeneratedQuestionListFormat = 'list' | 'text' | 'csv' | 'json' | 'training_jsonl';
 export type GeneratedQuestionDuplicateMode = 'all' | 'duplicates' | 'unique';
-export type GeneratedQuestionAnswerState = 'all' | 'not_generated' | 'answered' | 'not_found';
+export type GeneratedQuestionAnswerState =
+  | 'all'
+  | 'not_generated'
+  | 'answered'
+  | 'partial_evidence'
+  | 'insufficient_source'
+  | 'not_found';
 
 export interface GeneratedQuestionListItem {
   row_key: string;
@@ -756,6 +762,7 @@ export interface GeneratedQuestionListItem {
   question_revision: number | null;
   answer_state: Exclude<GeneratedQuestionAnswerState, 'all'>;
   answer_created_at?: string | null;
+  answer_updated_at?: string | null;
   answer_model_id?: string;
   current_chunk_revision: number;
   revision_state: 'current' | 'stale' | 'unknown';
@@ -794,11 +801,12 @@ export interface GeneratedQuestionAnswerResponse {
   success: boolean;
   data: {
     answer: string;
-    answer_status: 'answered' | 'not_found' | 'source_unavailable' | 'missing_question';
+    answer_status: 'answered' | 'partial_evidence' | 'insufficient_source' | 'not_found' | 'source_unavailable' | 'missing_question';
     answer_model_id: string;
     answer_cached?: boolean;
     answer_record_id?: string;
     answer_created_at?: string;
+    answer_updated_at?: string;
     source_revision_status: string;
     question_revision: number | null;
   };
@@ -813,7 +821,7 @@ export function listGeneratedQuestions(kbId: string, params?: GeneratedQuestionL
 /** Extract an answer from the saved question's exact chunk revision. */
 export function extractGeneratedQuestionAnswer(
   kbId: string,
-  input: { chunk_id: string; question_id: string | null; question_position: number },
+  input: { chunk_id: string; question_id: string | null; question_position: number; force_reanalysis?: boolean },
 ) {
   return post<GeneratedQuestionAnswerResponse>(
     `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answer`,
