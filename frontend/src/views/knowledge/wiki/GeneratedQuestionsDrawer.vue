@@ -633,10 +633,6 @@ async function generateFilteredAnswers() {
         ? firstResponse.data
         : firstResponse
       const targetCount = Number(firstBody?.total || 0)
-      if (targetCount + targets.length > 5000) {
-        MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationLimit'))
-        return
-      }
       if (Array.isArray(firstBody?.data)) targets.push(...firstBody.data)
 
       const pageCount = Math.ceil(targetCount / pageSize)

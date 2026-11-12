@@ -4218,7 +4218,6 @@ export default {
       generatedQuestionsGenerationSummary: 'Answered {answered}, partial evidence {partial}, insufficient answers {insufficient}, source unavailable {unavailable}, failed {failed}',
       generatedQuestionsStopGeneration: 'Stop',
       generatedQuestionsGenerationNoPending: 'There are no unanswered or reprocessable questions in this filter.',
-      generatedQuestionsGenerationLimit: 'A maximum of 5,000 answers can be generated at once. Narrow the filters and retry.',
       generatedQuestionsGenerationFailed: 'Could not load questions waiting for answers. Please retry.',
       generatedQuestionsAll: 'All questions',
       generatedQuestionsDuplicates: 'Duplicates only',

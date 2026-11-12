@@ -6019,7 +6019,6 @@ export default {
       generatedQuestionsGenerationSummary: '已回答 {answered}，保留部分證據 {partial}，不足以形成明確答案 {insufficient}，來源無法使用 {unavailable}，失敗 {failed}',
       generatedQuestionsStopGeneration: '停止',
       generatedQuestionsGenerationNoPending: '目前篩選範圍內沒有待產生或可重新分析的問題。',
-      generatedQuestionsGenerationLimit: '單次最多產生 5,000 筆，請縮小篩選範圍後重試。',
       generatedQuestionsGenerationFailed: '無法讀取待產生問題，請稍後重試。',
       generatedQuestionsAll: '全部問題',
       generatedQuestionsDuplicates: '僅重複項',
