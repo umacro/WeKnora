@@ -18,22 +18,48 @@ type generatedQuestionAnswerRequest struct {
 }
 
 type generatedQuestionAnswerExtractor interface {
+	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, question, source string) (string, string, error)
+}
+
+type generatedQuestionAnswerKnowledgeExtractor interface {
 	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, knowledgeID, question, source string) (string, string, error)
 }
 
+func supportsGeneratedQuestionAnswerExtraction(service interface{}) bool {
+	if _, ok := service.(generatedQuestionAnswerExtractor); ok {
+		return true
+	}
+	_, ok := service.(generatedQuestionAnswerKnowledgeExtractor)
+	return ok
+}
+
+func extractGeneratedQuestionAnswer(
+	service interface{}, ctx context.Context, item generatedQuestionListItem, source string,
+) (string, string, error) {
+	if extractor, ok := service.(generatedQuestionAnswerKnowledgeExtractor); ok {
+		return extractor.ExtractGeneratedQuestionAnswer(
+			ctx, item.KnowledgeBaseID, item.KnowledgeID, item.Question, source,
+		)
+	}
+	if extractor, ok := service.(generatedQuestionAnswerExtractor); ok {
+		return extractor.ExtractGeneratedQuestionAnswer(ctx, item.KnowledgeBaseID, item.Question, source)
+	}
+	return "", "", errors.NewServiceUnavailableError("Question answer extraction is unavailable")
+}
+
 type generatedQuestionSourceResolver struct {
-	handler           *ChunkHandler
-	ctx               context.Context
-	revisionCache     map[string][]*types.ChunkRevision
-	revisionLoaded    map[string]bool
+	handler            *ChunkHandler
+	ctx                context.Context
+	revisionCache      map[string][]*types.ChunkRevision
+	revisionLoaded     map[string]bool
 	revisionLoadFailed map[string]bool
 }
 
 func newGeneratedQuestionSourceResolver(ctx context.Context, h *ChunkHandler) *generatedQuestionSourceResolver {
 	return &generatedQuestionSourceResolver{
 		handler: h, ctx: ctx,
-		revisionCache: make(map[string][]*types.ChunkRevision),
-		revisionLoaded: make(map[string]bool),
+		revisionCache:      make(map[string][]*types.ChunkRevision),
+		revisionLoaded:     make(map[string]bool),
 		revisionLoadFailed: make(map[string]bool),
 	}
 }
@@ -144,38 +170,45 @@ func (h *ChunkHandler) AnswerGeneratedQuestion(c *gin.Context) {
 	answerStatus := "source_unavailable"
 	answer := ""
 	modelID := ""
+	answerCached := false
+	var answerRecord *types.GeneratedQuestionAnswer
 	if strings.TrimSpace(item.Question) == "" {
 		answerStatus = "missing_question"
 	} else if strings.TrimSpace(passage) != "" {
-		extractor, ok := h.service.(generatedQuestionAnswerExtractor)
-		if !ok {
+		if !supportsGeneratedQuestionAnswerExtraction(h.service) {
 			c.Error(errors.NewServiceUnavailableError("Question answer extraction is unavailable"))
 			return
 		}
-		answer, modelID, err = extractor.ExtractGeneratedQuestionAnswer(ctx, kbID, item.KnowledgeID, item.Question, passage)
+		answerRecord, answerCached, err = h.getOrGenerateGeneratedQuestionAnswer(
+			ctx, *item, passage, sourceStatus, nil,
+		)
 		if err != nil {
 			logger.ErrorWithFields(ctx, err, map[string]interface{}{
 				"knowledge_base_id": kbID, "chunk_id": request.ChunkID,
 				"question_id": request.QuestionID,
 			})
-			c.Error(errors.NewServiceUnavailableError("Could not extract an answer from the source text"))
+			c.Error(errors.NewServiceUnavailableError("Could not generate and save an answer from the source text"))
 			return
 		}
-		if strings.TrimSpace(answer) == "" {
-			answerStatus = "not_found"
-		} else {
-			answerStatus = "answered"
-		}
+		answer = answerRecord.Answer
+		answerStatus = answerRecord.AnswerStatus
+		modelID = answerRecord.AnswerModelID
 	}
 
+	data := gin.H{
+		"answer":                 answer,
+		"answer_status":          answerStatus,
+		"answer_model_id":        modelID,
+		"answer_cached":          answerCached,
+		"source_revision_status": sourceStatus,
+		"question_revision":      item.QuestionRevision,
+	}
+	if answerRecord != nil {
+		data["answer_record_id"] = answerRecord.ID
+		data["answer_created_at"] = answerRecord.CreatedAt
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data": gin.H{
-			"answer": answer,
-			"answer_status": answerStatus,
-			"answer_model_id": modelID,
-			"source_revision_status": sourceStatus,
-			"question_revision": item.QuestionRevision,
-		},
+		"data":    data,
 	})
 }

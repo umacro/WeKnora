@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -23,10 +24,10 @@ import (
 )
 
 const (
-	generatedQuestionDefaultPageSize = 20
-	generatedQuestionMaxPageSize     = 100
-	generatedQuestionMaxExportRows   = 5000
-	generatedQuestionMaxExportBytes  = 10 << 20
+	generatedQuestionDefaultPageSize  = 20
+	generatedQuestionMaxPageSize      = 100
+	generatedQuestionMaxExportRows    = 5000
+	generatedQuestionMaxExportBytes   = 10 << 20
 	generatedQuestionMaxTrainingBytes = 50 << 20
 )
 
@@ -68,33 +69,35 @@ type generatedQuestionListQuery struct {
 }
 
 type generatedQuestionTrainingRecord struct {
-	Query                string                           `json:"query"`
-	Answer               string                           `json:"answer"`
-	AnswerStatus         string                           `json:"answer_status"`
-	PositivePassage      string                           `json:"positive_passage,omitempty"`
-	Label                int                              `json:"label"`
-	TrainingReady        bool                             `json:"training_ready"`
-	TrainingExclusion    []string                         `json:"training_exclusion_reasons,omitempty"`
-	SourceRevisionStatus string                           `json:"source_revision_status"`
+	Query                string                            `json:"query"`
+	Answer               string                            `json:"answer"`
+	AnswerStatus         string                            `json:"answer_status"`
+	PositivePassage      string                            `json:"positive_passage,omitempty"`
+	Label                int                               `json:"label"`
+	TrainingReady        bool                              `json:"training_ready"`
+	TrainingExclusion    []string                          `json:"training_exclusion_reasons,omitempty"`
+	SourceRevisionStatus string                            `json:"source_revision_status"`
 	Metadata             generatedQuestionTrainingMetadata `json:"metadata"`
 }
 
 type generatedQuestionTrainingMetadata struct {
-	KnowledgeBaseID      string  `json:"knowledge_base_id"`
-	KnowledgeID          string  `json:"knowledge_id"`
-	KnowledgeTitle       *string `json:"knowledge_title"`
-	ChunkID              string  `json:"chunk_id"`
-	ChunkIndex           int     `json:"chunk_index"`
-	QuestionID           *string `json:"question_id"`
-	QuestionPosition     int     `json:"question_position"`
-	QuestionRevision     *int    `json:"question_revision"`
-	CurrentChunkRevision int     `json:"current_chunk_revision"`
-	RevisionState        string  `json:"revision_state"`
-	ChunkAvailability    string  `json:"chunk_availability"`
-	IndexStatus          string  `json:"index_status"`
-	IsDuplicate          bool    `json:"is_duplicate"`
-	DuplicateCount       int     `json:"duplicate_count"`
-	AnswerModelID        string  `json:"answer_model_id,omitempty"`
+	KnowledgeBaseID      string     `json:"knowledge_base_id"`
+	KnowledgeID          string     `json:"knowledge_id"`
+	KnowledgeTitle       *string    `json:"knowledge_title"`
+	ChunkID              string     `json:"chunk_id"`
+	ChunkIndex           int        `json:"chunk_index"`
+	QuestionID           *string    `json:"question_id"`
+	QuestionPosition     int        `json:"question_position"`
+	QuestionRevision     *int       `json:"question_revision"`
+	CurrentChunkRevision int        `json:"current_chunk_revision"`
+	RevisionState        string     `json:"revision_state"`
+	ChunkAvailability    string     `json:"chunk_availability"`
+	IndexStatus          string     `json:"index_status"`
+	IsDuplicate          bool       `json:"is_duplicate"`
+	DuplicateCount       int        `json:"duplicate_count"`
+	AnswerModelID        string     `json:"answer_model_id,omitempty"`
+	AnswerRecordID       string     `json:"answer_record_id,omitempty"`
+	AnswerCreatedAt      *time.Time `json:"answer_created_at,omitempty"`
 }
 
 // ListGeneratedQuestions returns the questions still stored in readable
@@ -492,12 +495,8 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 	}
 
 	resolver := newGeneratedQuestionSourceResolver(c.Request.Context(), h)
-	extractor, canExtractAnswers := h.service.(generatedQuestionAnswerExtractor)
-	type cachedAnswer struct {
-		answer  string
-		modelID string
-	}
-	answerCache := make(map[string]cachedAnswer)
+	canExtractAnswers := supportsGeneratedQuestionAnswerExtraction(h.service)
+	answerCache := make(map[string]generatedQuestionAnswerCacheEntry)
 	var body strings.Builder
 
 	for _, item := range items {
@@ -535,28 +534,24 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 				c.Error(errors.NewServiceUnavailableError("Question answer extraction is unavailable"))
 				return
 			}
-			cacheDigest := sha256.Sum256([]byte(item.KnowledgeBaseID + "\x00" + item.KnowledgeID + "\x00" + item.Question + "\x00" + record.PositivePassage))
-			cacheKey := hex.EncodeToString(cacheDigest[:])
-			cached, exists := answerCache[cacheKey]
-			if !exists {
-				answer, modelID, err := extractor.ExtractGeneratedQuestionAnswer(
-					c.Request.Context(), item.KnowledgeBaseID, item.KnowledgeID, item.Question, record.PositivePassage,
-				)
-				if err != nil {
-					logger.ErrorWithFields(c.Request.Context(), err, map[string]interface{}{
-						"knowledge_base_id": item.KnowledgeBaseID,
-						"chunk_id":          item.ChunkID,
-						"question_id":       generatedQuestionStringValue(item.QuestionID),
-					})
-					c.Error(errors.NewServiceUnavailableError("Could not extract all training answers"))
-					return
-				}
-				cached = cachedAnswer{answer: strings.TrimSpace(answer), modelID: modelID}
-				answerCache[cacheKey] = cached
+			answerRecord, _, err := h.getOrGenerateGeneratedQuestionAnswer(
+				c.Request.Context(), item, record.PositivePassage, sourceStatus,
+				answerCache,
+			)
+			if err != nil {
+				logger.ErrorWithFields(c.Request.Context(), err, map[string]interface{}{
+					"knowledge_base_id": item.KnowledgeBaseID,
+					"chunk_id":          item.ChunkID,
+					"question_id":       generatedQuestionStringValue(item.QuestionID),
+				})
+				c.Error(errors.NewServiceUnavailableError("Could not generate and save all training answers"))
+				return
 			}
-			record.Answer = cached.answer
-			record.Metadata.AnswerModelID = cached.modelID
-			if cached.answer == "" {
+			record.Answer = answerRecord.Answer
+			record.Metadata.AnswerModelID = answerRecord.AnswerModelID
+			record.Metadata.AnswerRecordID = answerRecord.ID
+			record.Metadata.AnswerCreatedAt = &answerRecord.CreatedAt
+			if answerRecord.AnswerStatus == "not_found" {
 				record.AnswerStatus = "not_found"
 				reasons = append(reasons, "answer_not_found")
 			} else {
