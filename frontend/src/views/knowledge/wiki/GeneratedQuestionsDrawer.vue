@@ -612,8 +612,17 @@ async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false)
 }
 
 function answerBatchPayload(response: any): GeneratedQuestionAnswerBatchSnapshot | null {
-  const body = response?.data && !Array.isArray(response.data) ? response.data : response
-  return body?.data || null
+  const isSnapshot = (value: any): value is GeneratedQuestionAnswerBatchSnapshot =>
+    value && typeof value === 'object' && typeof value.id === 'string' && typeof value.status === 'string'
+
+  // The shared request interceptor normally unwraps Axios's response.data,
+  // leaving the API envelope { success, data: snapshot }. Also accept the
+  // Axios-wrapped shape so task polling works with either transport result.
+  const body = response?.data && typeof response.data === 'object' ? response.data : response
+  if (isSnapshot(body)) return body
+  if (isSnapshot(body?.data)) return body.data
+  if (isSnapshot(body?.data?.data)) return body.data.data
+  return null
 }
 
 function syncAnswerBatch(snapshot: GeneratedQuestionAnswerBatchSnapshot) {
