@@ -820,7 +820,8 @@ export function exportGeneratedQuestions(
   format: Exclude<GeneratedQuestionListFormat, 'list'>,
 ): Promise<Blob> {
   const query = buildQuery({ ...params, format });
-  return getDown(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`);
+  const config = format === 'training_jsonl' ? { timeout: 300000 } : undefined;
+  return getDown(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`, config);
 }
 
 export function listKnowledgeTags(
