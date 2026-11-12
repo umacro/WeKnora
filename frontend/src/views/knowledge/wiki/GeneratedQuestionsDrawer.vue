@@ -66,14 +66,19 @@
 
       <div v-if="answerBatch.running" class="generated-questions-answer-progress" role="status">
         <div class="generated-questions-answer-progress-heading">
-          <span>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGeneratingAnswers', {
+          <span v-if="answerBatch.phase === 'preparing'">
+            {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsPreparingAnswers') }}
+          </span>
+          <span v-else>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGeneratingAnswers', {
             done: answerBatch.done, total: answerBatch.total || '…'
           }) }}</span>
-          <t-button size="small" variant="text" @click="stopAnswerGeneration">
+          <t-button size="small" variant="text" :loading="answerBatch.stopRequested"
+            :disabled="answerBatch.stopRequested" @click="stopAnswerGeneration">
             {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsStopGeneration') }}
           </t-button>
         </div>
-        <progress :max="Math.max(answerBatch.total, 1)" :value="answerBatch.done" />
+        <progress v-if="answerBatch.phase !== 'preparing'"
+          :max="Math.max(answerBatch.total, 1)" :value="answerBatch.done" />
         <div class="generated-questions-answer-progress-counts">
           {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
             answered: answerBatch.answered,
@@ -236,10 +241,15 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import {
   extractGeneratedQuestionAnswer,
   exportGeneratedQuestions,
+  getCurrentGeneratedQuestionAnswerBatch,
+  getGeneratedQuestionAnswerBatch,
   getChunkByIdOnly,
   listChunkRevisions,
   listGeneratedQuestions,
+  startGeneratedQuestionAnswerBatch,
+  stopGeneratedQuestionAnswerBatch,
   type GeneratedQuestionAnswerState,
+  type GeneratedQuestionAnswerBatchSnapshot,
   type GeneratedQuestionDuplicateMode,
   type GeneratedQuestionListItem,
   type GeneratedQuestionListParams,
@@ -274,6 +284,8 @@ const errorMessage = ref('')
 const answerBatch = reactive({
   running: false,
   stopRequested: false,
+  taskId: '',
+  phase: 'preparing',
   total: 0,
   done: 0,
   answered: 0,
@@ -309,6 +321,7 @@ interface GeneratedQuestionAnswerCache {
 
 const answerCache = reactive<Record<string, GeneratedQuestionAnswerCache>>({})
 const answerLoadPromises = new Map<string, Promise<void>>()
+let pollingAnswerBatchTaskId = ''
 
 const duplicateOptions = computed(() => [
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAll'), value: 'all' },
@@ -338,6 +351,7 @@ watch(() => props.visible, (visible) => {
   if (visible) {
     page.value = 1
     void loadPage(1)
+    void resumeCurrentAnswerBatch()
   }
 })
 
@@ -597,8 +611,108 @@ async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false)
   }
 }
 
-function stopAnswerGeneration() {
+function answerBatchPayload(response: any): GeneratedQuestionAnswerBatchSnapshot | null {
+  const body = response?.data && !Array.isArray(response.data) ? response.data : response
+  return body?.data || null
+}
+
+function syncAnswerBatch(snapshot: GeneratedQuestionAnswerBatchSnapshot) {
+  answerBatch.taskId = snapshot.id
+  answerBatch.phase = snapshot.status
+  answerBatch.running = snapshot.status === 'preparing' || snapshot.status === 'running'
+  answerBatch.total = snapshot.total
+  answerBatch.done = snapshot.done
+  answerBatch.answered = snapshot.answered
+  answerBatch.partialEvidence = snapshot.partial_evidence
+  answerBatch.insufficient = snapshot.insufficient
+  answerBatch.unavailable = snapshot.unavailable
+  answerBatch.failed = snapshot.failed
+}
+
+function answerBatchSummary() {
+  return t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
+    answered: answerBatch.answered,
+    partial: answerBatch.partialEvidence,
+    insufficient: answerBatch.insufficient,
+    unavailable: answerBatch.unavailable,
+    failed: answerBatch.failed,
+  })
+}
+
+async function finishAnswerBatch(snapshot: GeneratedQuestionAnswerBatchSnapshot) {
+  syncAnswerBatch(snapshot)
+  answerBatch.running = false
+  answerBatch.stopRequested = false
+  answerBatch.taskId = ''
+  if (snapshot.status === 'failed') {
+    MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
+  } else if (snapshot.total === 0) {
+    MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
+  } else if (snapshot.status === 'stopped') {
+    MessagePlugin.info(answerBatchSummary())
+  } else if (snapshot.failed > 0) {
+    MessagePlugin.error(answerBatchSummary())
+  } else {
+    MessagePlugin.success(answerBatchSummary())
+  }
+  await loadPage(page.value)
+}
+
+async function monitorAnswerBatch(taskId: string) {
+  if (pollingAnswerBatchTaskId === taskId) return
+  pollingAnswerBatchTaskId = taskId
+  let consecutiveErrors = 0
+  while (pollingAnswerBatchTaskId === taskId) {
+    try {
+      const response = await getGeneratedQuestionAnswerBatch(props.kbId, taskId)
+      const snapshot = answerBatchPayload(response)
+      if (!snapshot) throw new Error('Empty answer task response')
+      consecutiveErrors = 0
+      syncAnswerBatch(snapshot)
+      if (['completed', 'stopped', 'failed'].includes(snapshot.status)) {
+        pollingAnswerBatchTaskId = ''
+        await finishAnswerBatch(snapshot)
+        return
+      }
+    } catch {
+      consecutiveErrors++
+      if (consecutiveErrors >= 10) {
+        pollingAnswerBatchTaskId = ''
+        answerBatch.running = false
+        MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
+        return
+      }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 2000))
+  }
+}
+
+async function resumeCurrentAnswerBatch() {
+  if (answerBatch.running) return
+  try {
+    const response = await getCurrentGeneratedQuestionAnswerBatch(props.kbId)
+    const snapshot = answerBatchPayload(response)
+    if (snapshot && (snapshot.status === 'preparing' || snapshot.status === 'running')) {
+      answerBatch.stopRequested = false
+      syncAnswerBatch(snapshot)
+      await monitorAnswerBatch(snapshot.id)
+    }
+  } catch {
+    // The question list remains usable if there is no active task to resume.
+  }
+}
+
+async function stopAnswerGeneration() {
+  if (!answerBatch.taskId || answerBatch.stopRequested) return
   answerBatch.stopRequested = true
+  try {
+    const response = await stopGeneratedQuestionAnswerBatch(props.kbId, answerBatch.taskId)
+    const snapshot = answerBatchPayload(response)
+    if (snapshot) syncAnswerBatch(snapshot)
+  } catch {
+    answerBatch.stopRequested = false
+    MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
+  }
 }
 
 async function generateFilteredAnswers() {
@@ -606,6 +720,8 @@ async function generateFilteredAnswers() {
 
   answerBatch.running = true
   answerBatch.stopRequested = false
+  answerBatch.taskId = ''
+  answerBatch.phase = 'preparing'
   answerBatch.total = 0
   answerBatch.done = 0
   answerBatch.answered = 0
@@ -615,114 +731,14 @@ async function generateFilteredAnswers() {
   answerBatch.failed = 0
 
   try {
-    const pageSize = 100
-    const selectedState = filters.answer_state || 'all'
-    const targetStates: GeneratedQuestionAnswerState[] = selectedState === 'all'
-      ? ['not_generated', 'not_found', 'partial_evidence', 'insufficient_source']
-      : selectedState === 'answered' ? [] : [selectedState]
-    const targets: GeneratedQuestionListItem[] = []
-
-    for (const targetState of targetStates) {
-      const generationFilters = { ...filters, answer_state: targetState }
-      const firstResponse = await listGeneratedQuestions(props.kbId, {
-        ...generationFilters,
-        page: 1,
-        page_size: pageSize,
-      }) as any
-      const firstBody = firstResponse?.data && !Array.isArray(firstResponse.data)
-        ? firstResponse.data
-        : firstResponse
-      const targetCount = Number(firstBody?.total || 0)
-      if (Array.isArray(firstBody?.data)) targets.push(...firstBody.data)
-
-      const pageCount = Math.ceil(targetCount / pageSize)
-      for (let requestPage = 2; requestPage <= pageCount; requestPage++) {
-        const response = await listGeneratedQuestions(props.kbId, {
-          ...generationFilters,
-          page: requestPage,
-          page_size: pageSize,
-        }) as any
-        const body = response?.data && !Array.isArray(response.data) ? response.data : response
-        if (Array.isArray(body?.data)) targets.push(...body.data)
-      }
-    }
-
-    const targetMap = new Map<string, GeneratedQuestionListItem>()
-    targets.forEach((row) => targetMap.set(row.row_key, row))
-    const uniqueTargets = [...targetMap.values()]
-    answerBatch.total = uniqueTargets.length
-    if (uniqueTargets.length === 0) {
-      MessagePlugin.info(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationNoPending'))
-      return
-    }
-
-    let nextIndex = 0
-    const worker = async () => {
-      while (!answerBatch.stopRequested) {
-        const index = nextIndex++
-        if (index >= uniqueTargets.length) return
-        const row = uniqueTargets[index]
-        try {
-          const response = await extractGeneratedQuestionAnswer(props.kbId, {
-            chunk_id: row.chunk_id,
-            question_id: row.question_id,
-            question_position: row.question_position,
-            force_reanalysis: row.answer_state !== 'not_generated',
-          }) as any
-          const data = response?.data?.data ?? response?.data ?? response
-          const status = String(data?.answer_status || 'source_unavailable')
-          if (status === 'answered' || status === 'partial_evidence'
-            || status === 'insufficient_source' || status === 'not_found') {
-            const normalizedStatus = status === 'not_found' ? 'insufficient_source' : status
-            if (normalizedStatus === 'answered') answerBatch.answered++
-            else if (normalizedStatus === 'partial_evidence') answerBatch.partialEvidence++
-            else answerBatch.insufficient++
-            row.answer_state = normalizedStatus
-            row.answer_created_at = data?.answer_created_at || null
-            row.answer_updated_at = data?.answer_updated_at || row.answer_created_at
-            row.answer_model_id = String(data?.answer_model_id || '')
-            answerCache[row.row_key] = {
-              loading: false,
-              loaded: true,
-              error: false,
-              answer: String(data?.answer || ''),
-              status: normalizedStatus,
-              modelId: row.answer_model_id,
-            }
-            const visibleRow = rows.value.find((visible) => visible.row_key === row.row_key)
-            if (visibleRow) {
-              visibleRow.answer_state = row.answer_state
-              visibleRow.answer_created_at = row.answer_created_at
-              visibleRow.answer_updated_at = row.answer_updated_at
-              visibleRow.answer_model_id = row.answer_model_id
-            }
-          } else {
-            answerBatch.unavailable++
-          }
-        } catch {
-          answerBatch.failed++
-        } finally {
-          answerBatch.done++
-        }
-      }
-    }
-
-    await Promise.all([worker(), worker(), worker()])
-    const summary = t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
-      answered: answerBatch.answered,
-      partial: answerBatch.partialEvidence,
-      insufficient: answerBatch.insufficient,
-      unavailable: answerBatch.unavailable,
-      failed: answerBatch.failed,
-    })
-    if (answerBatch.failed > 0) MessagePlugin.error(summary)
-    else MessagePlugin.success(summary)
+    const response = await startGeneratedQuestionAnswerBatch(props.kbId, filters) as any
+    const snapshot = answerBatchPayload(response)
+    if (!snapshot) throw new Error('Empty answer task response')
+    syncAnswerBatch(snapshot)
+    await monitorAnswerBatch(snapshot.id)
   } catch {
-    MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
-  } finally {
     answerBatch.running = false
-    answerBatch.total = Math.max(answerBatch.total, answerBatch.done)
-    await loadPage(page.value)
+    MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationFailed'))
   }
 }
 

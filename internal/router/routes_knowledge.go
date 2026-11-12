@@ -53,12 +53,16 @@ func RegisterChunkRoutes(r *gin.RouterGroup, handler *handler.ChunkHandler, g *r
 		chunks.POST("/by-id/:id/questions/regenerate", g.OwnedChunkKBOrAdminFromChunkID(), g.KBAccessWriteFromChunkIDParam("id"), handler.RegenerateGeneratedQuestions)
 	}
 
-	// KB-scoped, read-only inventory of questions already saved on document
-	// chunks. The KB guard resolves own/shared access and the effective tenant
-	// before the handler runs; no generation or mutation route is involved.
+	// KB-scoped generated-question inventory and exact-source answer extraction.
+	// The KB guard resolves own/shared access and the effective tenant before
+	// each handler runs; answer generation is an explicit user-started action.
 	kbQuestionRead := g.apiKeyGroup(r.Group("/knowledge-bases/:id"), apiKeyRetrieve(apiKeyFullAccess()))
 	kbQuestionRead.GET("/generated-questions", g.Viewer(), g.KBAccessRead("id"), handler.ListGeneratedQuestions)
 	kbQuestionRead.POST("/generated-questions/answer", g.Viewer(), g.KBAccessRead("id"), handler.AnswerGeneratedQuestion)
+	kbQuestionRead.POST("/generated-questions/answers/batch", g.Viewer(), g.KBAccessRead("id"), handler.StartGeneratedQuestionAnswerBatch)
+	kbQuestionRead.GET("/generated-questions/answers/batch/current", g.Viewer(), g.KBAccessRead("id"), handler.CurrentGeneratedQuestionAnswerBatch)
+	kbQuestionRead.GET("/generated-questions/answers/batch/:task_id", g.Viewer(), g.KBAccessRead("id"), handler.GetGeneratedQuestionAnswerBatch)
+	kbQuestionRead.POST("/generated-questions/answers/batch/:task_id/stop", g.Viewer(), g.KBAccessRead("id"), handler.StopGeneratedQuestionAnswerBatch)
 }
 
 // RegisterKnowledgeRoutes 注册知识相关的路由

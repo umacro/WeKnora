@@ -28,13 +28,17 @@ import (
 // access — that lookup answers "is the caller the creator of THIS
 // resource", not "does the caller's tenant have access").
 type ChunkHandler struct {
-	service   interfaces.ChunkService
-	kgService interfaces.KnowledgeService
+	service        interfaces.ChunkService
+	kgService      interfaces.KnowledgeService
+	answerBatches  *generatedQuestionAnswerBatchManager
 }
 
 // NewChunkHandler creates a new chunk handler.
 func NewChunkHandler(service interfaces.ChunkService, kgService interfaces.KnowledgeService) *ChunkHandler {
-	return &ChunkHandler{service: service, kgService: kgService}
+	return &ChunkHandler{
+		service: service, kgService: kgService,
+		answerBatches: newGeneratedQuestionAnswerBatchManager(),
+	}
 }
 
 // GetChunkByIDOnly godoc

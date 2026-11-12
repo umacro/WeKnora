@@ -812,10 +812,27 @@ export interface GeneratedQuestionAnswerResponse {
   };
 }
 
+export interface GeneratedQuestionAnswerBatchSnapshot {
+  id: string;
+  knowledge_base_id: string;
+  status: 'preparing' | 'running' | 'completed' | 'stopped' | 'failed';
+  total: number;
+  done: number;
+  answered: number;
+  partial_evidence: number;
+  insufficient: number;
+  unavailable: number;
+  failed: number;
+  error?: string;
+}
+
 /** Read saved document-chunk questions without starting or changing generation. */
 export function listGeneratedQuestions(kbId: string, params?: GeneratedQuestionListParams) {
   const query = buildQuery(params);
-  return get<GeneratedQuestionListResponse>(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`);
+  return get<GeneratedQuestionListResponse>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`,
+    { timeout: 120000 },
+  );
 }
 
 /** Extract an answer from the saved question's exact chunk revision. */
@@ -827,6 +844,36 @@ export function extractGeneratedQuestionAnswer(
     `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answer`,
     input,
     { timeout: 300000 },
+  );
+}
+
+export function startGeneratedQuestionAnswerBatch(
+  kbId: string,
+  params?: GeneratedQuestionListParams,
+) {
+  const query = buildQuery(params);
+  return post<{ success: boolean; data: GeneratedQuestionAnswerBatchSnapshot }>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answers/batch${query}`,
+    {},
+  );
+}
+
+export function getCurrentGeneratedQuestionAnswerBatch(kbId: string) {
+  return get<{ success: boolean; data: GeneratedQuestionAnswerBatchSnapshot | null }>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answers/batch/current`,
+  );
+}
+
+export function getGeneratedQuestionAnswerBatch(kbId: string, taskId: string) {
+  return get<{ success: boolean; data: GeneratedQuestionAnswerBatchSnapshot }>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answers/batch/${encodeURIComponent(taskId)}`,
+  );
+}
+
+export function stopGeneratedQuestionAnswerBatch(kbId: string, taskId: string) {
+  return post<{ success: boolean; data: GeneratedQuestionAnswerBatchSnapshot }>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answers/batch/${encodeURIComponent(taskId)}/stop`,
+    {},
   );
 }
 
