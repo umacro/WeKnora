@@ -785,10 +785,32 @@ export interface GeneratedQuestionListResponse {
   page_size: number;
 }
 
+export interface GeneratedQuestionAnswerResponse {
+  success: boolean;
+  data: {
+    answer: string;
+    answer_status: 'answered' | 'not_found' | 'source_unavailable' | 'missing_question';
+    answer_model_id: string;
+    source_revision_status: string;
+    question_revision: number | null;
+  };
+}
+
 /** Read saved document-chunk questions without starting or changing generation. */
 export function listGeneratedQuestions(kbId: string, params?: GeneratedQuestionListParams) {
   const query = buildQuery(params);
   return get<GeneratedQuestionListResponse>(`/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions${query}`);
+}
+
+/** Extract an answer from the saved question's exact chunk revision. */
+export function extractGeneratedQuestionAnswer(
+  kbId: string,
+  input: { chunk_id: string; question_id: string | null; question_position: number },
+) {
+  return post<GeneratedQuestionAnswerResponse>(
+    `/api/v1/knowledge-bases/${encodeURIComponent(kbId)}/generated-questions/answer`,
+    input,
+  );
 }
 
 /** Export the complete filtered question result, not only the current page. */

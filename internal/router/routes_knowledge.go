@@ -58,6 +58,7 @@ func RegisterChunkRoutes(r *gin.RouterGroup, handler *handler.ChunkHandler, g *r
 	// before the handler runs; no generation or mutation route is involved.
 	kbQuestionRead := g.apiKeyGroup(r.Group("/knowledge-bases/:id"), apiKeyRetrieve(apiKeyFullAccess()))
 	kbQuestionRead.GET("/generated-questions", g.Viewer(), g.KBAccessRead("id"), handler.ListGeneratedQuestions)
+	kbQuestionRead.POST("/generated-questions/answer", g.Viewer(), g.KBAccessRead("id"), handler.AnswerGeneratedQuestion)
 }
 
 // RegisterKnowledgeRoutes 注册知识相关的路由

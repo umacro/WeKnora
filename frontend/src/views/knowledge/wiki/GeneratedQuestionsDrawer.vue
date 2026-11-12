@@ -126,6 +126,29 @@
                         {{ $t('common.retry') }}
                       </t-button>
                     </div>
+                    <div class="source-answer-panel">
+                      <div class="source-answer-heading">
+                        {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswer') }}
+                      </div>
+                      <div v-if="answerCache[row.row_key]?.loading" class="source-original-state">
+                        <t-loading size="small" />
+                        <span>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerLoading') }}</span>
+                      </div>
+                      <div v-else-if="answerCache[row.row_key]?.error" class="source-original-error">
+                        <span>{{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerFailed') }}</span>
+                        <t-button size="small" variant="text" @click="loadQuestionAnswer(row, true)">
+                          {{ $t('common.retry') }}
+                        </t-button>
+                      </div>
+                      <div v-else-if="answerCache[row.row_key]?.loaded">
+                        <pre v-if="answerCache[row.row_key]?.answer" class="source-answer-text">{{ answerCache[row.row_key].answer }}</pre>
+                        <div v-else class="source-original-empty">
+                          {{ answerCache[row.row_key]?.status === 'not_found'
+                            ? $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFound')
+                            : $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable') }}
+                        </div>
+                      </div>
+                    </div>
                     <pre v-if="sourceVersionAvailable(row) && sourceContentForRow(row)"
                       class="source-original-text">{{ sourceContentForRow(row) }}</pre>
                     <div v-else-if="sourceVersionAvailable(row)" class="source-original-empty">
@@ -172,6 +195,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
 import {
+  extractGeneratedQuestionAnswer,
   exportGeneratedQuestions,
   getChunkByIdOnly,
   listChunkRevisions,
@@ -221,6 +245,18 @@ interface GeneratedQuestionSourceCache {
 
 const sourceCache = reactive<Record<string, GeneratedQuestionSourceCache>>({})
 const sourceLoadPromises = new Map<string, Promise<void>>()
+
+interface GeneratedQuestionAnswerCache {
+  loading: boolean
+  loaded: boolean
+  error: boolean
+  answer: string
+  status: string
+  modelId: string
+}
+
+const answerCache = reactive<Record<string, GeneratedQuestionAnswerCache>>({})
+const answerLoadPromises = new Map<string, Promise<void>>()
 
 const duplicateOptions = computed(() => [
   { label: t('knowledgeEditor.wikiBrowser.generatedQuestionsAll'), value: 'all' },
@@ -313,6 +349,13 @@ async function toggleSourceOriginal(row: GeneratedQuestionListItem) {
   expandedSources[row.row_key] = !expandedSources[row.row_key]
   if (expandedSources[row.row_key]) {
     await loadSourceOriginal(row)
+    if (sourceVersionAvailable(row) && sourceContentForRow(row).trim()) {
+      await loadQuestionAnswer(row)
+    } else {
+      answerCache[row.row_key] = {
+        loading: false, loaded: true, error: false, answer: '', status: 'source_unavailable', modelId: '',
+      }
+    }
   }
 }
 
@@ -411,6 +454,47 @@ function sourceRevisionLabel(row: GeneratedQuestionListItem) {
     : t('knowledgeEditor.wikiBrowser.generatedQuestionsSourceUnavailable')
 }
 
+async function loadQuestionAnswer(row: GeneratedQuestionListItem, force = false) {
+  const existing = answerCache[row.row_key]
+  const inFlight = answerLoadPromises.get(row.row_key)
+  if (inFlight) {
+    await inFlight
+    return
+  }
+  if (existing?.loaded && !existing.error && !force) return
+
+  answerCache[row.row_key] = {
+    loading: true, loaded: false, error: false, answer: '', status: '', modelId: '',
+  }
+  const request = (async () => {
+    try {
+      const response = await extractGeneratedQuestionAnswer(props.kbId, {
+        chunk_id: row.chunk_id,
+        question_id: row.question_id,
+        question_position: row.question_position,
+      }) as any
+      const data = response?.data?.data ?? response?.data ?? response
+      answerCache[row.row_key].answer = String(data?.answer || '')
+      answerCache[row.row_key].status = String(data?.answer_status || 'source_unavailable')
+      answerCache[row.row_key].modelId = String(data?.answer_model_id || '')
+      answerCache[row.row_key].loaded = true
+    } catch {
+      answerCache[row.row_key].error = true
+      answerCache[row.row_key].loaded = true
+    } finally {
+      answerCache[row.row_key].loading = false
+    }
+  })()
+  answerLoadPromises.set(row.row_key, request)
+  try {
+    await request
+  } finally {
+    if (answerLoadPromises.get(row.row_key) === request) {
+      answerLoadPromises.delete(row.row_key)
+    }
+  }
+}
+
 async function copyQuestionAndSource(row: GeneratedQuestionListItem) {
   copyingRows[row.row_key] = true
   try {
@@ -422,6 +506,17 @@ async function copyQuestionAndSource(row: GeneratedQuestionListItem) {
     }
     if (!sourceVersionAvailable(row)) {
       MessagePlugin.error(sourceRevisionLabel(row))
+      return
+    }
+    if (!sourceContentForRow(row).trim()) {
+      MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable'))
+      return
+    }
+
+    await loadQuestionAnswer(row)
+    const answer = answerCache[row.row_key]
+    if (!answer || answer.error) {
+      MessagePlugin.error(t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerFailed'))
       return
     }
 
@@ -436,6 +531,9 @@ async function copyQuestionAndSource(row: GeneratedQuestionListItem) {
     ].join('; ')
     const text = [
       `${t('knowledgeEditor.wikiBrowser.generatedQuestionsQuestion')}:\n${row.question || t('knowledgeEditor.wikiBrowser.generatedQuestionsMissingText')}`,
+      `${t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswer')}:\n${answer.answer || (answer.status === 'not_found'
+        ? t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerNotFound')
+        : t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerUnavailable'))}`,
       `${t('knowledgeEditor.wikiBrowser.generatedQuestionsSource')}:\n${sourceRevisionLabel(row)}\n\n${sourceContent}`,
       `[${trace}]`,
     ].join('\n\n')
@@ -679,6 +777,26 @@ async function downloadExport(format: 'csv' | 'json' | 'training_jsonl') {
   max-height: 280px;
   margin: 8px 0 0;
   overflow: auto;
+  color: var(--td-text-color-primary);
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.source-answer-panel {
+  margin-top: 12px;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--td-bg-color-container-hover);
+}
+
+.source-answer-heading {
+  color: var(--td-text-color-primary);
+  font-weight: 600;
+}
+
+.source-answer-text {
+  margin: 6px 0 0;
   color: var(--td-text-color-primary);
   font: inherit;
   white-space: pre-wrap;

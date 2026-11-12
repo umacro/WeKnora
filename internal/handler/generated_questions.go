@@ -69,6 +69,8 @@ type generatedQuestionListQuery struct {
 
 type generatedQuestionTrainingRecord struct {
 	Query                string                           `json:"query"`
+	Answer               string                           `json:"answer"`
+	AnswerStatus         string                           `json:"answer_status"`
 	PositivePassage      string                           `json:"positive_passage,omitempty"`
 	Label                int                              `json:"label"`
 	TrainingReady        bool                             `json:"training_ready"`
@@ -92,6 +94,7 @@ type generatedQuestionTrainingMetadata struct {
 	IndexStatus          string  `json:"index_status"`
 	IsDuplicate          bool    `json:"is_duplicate"`
 	DuplicateCount       int     `json:"duplicate_count"`
+	AnswerModelID        string  `json:"answer_model_id,omitempty"`
 }
 
 // ListGeneratedQuestions returns the questions still stored in readable
@@ -472,9 +475,10 @@ func generatedQuestionStringValue(value *string) string {
 	return *value
 }
 
-// writeGeneratedQuestionTrainingExport emits question-to-positive-passage
-// retrieval examples. It deliberately does not synthesize an answer; records
-// whose source revision cannot be verified are included with training_ready=false.
+// writeGeneratedQuestionTrainingExport emits question, answer, and
+// question-to-positive-passage training examples. Answers are extracted from
+// the exact saved source revision; unavailable source text is never replaced
+// with the current chunk body.
 func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 	c *gin.Context,
 	items []generatedQuestionListItem,
@@ -487,9 +491,13 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 		}
 	}
 
-	revisionCache := make(map[string][]*types.ChunkRevision)
-	revisionLoaded := make(map[string]bool)
-	revisionLoadFailed := make(map[string]bool)
+	resolver := newGeneratedQuestionSourceResolver(c.Request.Context(), h)
+	extractor, canExtractAnswers := h.service.(generatedQuestionAnswerExtractor)
+	type cachedAnswer struct {
+		answer  string
+		modelID string
+	}
+	answerCache := make(map[string]cachedAnswer)
 	var body strings.Builder
 
 	for _, item := range items {
@@ -506,56 +514,54 @@ func (h *ChunkHandler) writeGeneratedQuestionTrainingExport(
 				IsDuplicate: item.IsDuplicate, DuplicateCount: item.DuplicateCount,
 			},
 		}
-		reasons := make([]string, 0, 3)
+		reasons := make([]string, 0, 4)
 		chunk := chunkByID[item.ChunkID]
-		sourceStatus := "missing_chunk"
-		if chunk != nil {
-			switch {
-			case item.QuestionRevision == nil:
-				sourceStatus = "revision_unknown"
-				record.PositivePassage = chunk.Content
-				reasons = append(reasons, "source_revision_unknown")
-			case *item.QuestionRevision == chunk.ContentRevision:
-				sourceStatus = "current_revision"
-				record.PositivePassage = chunk.Content
-			default:
-				if !revisionLoaded[item.ChunkID] {
-					revisions, err := h.service.ListChunkRevisions(c.Request.Context(), item.ChunkID)
-					revisionLoaded[item.ChunkID] = true
-					if err != nil {
-						revisionLoadFailed[item.ChunkID] = true
-					} else {
-						revisionCache[item.ChunkID] = revisions
-					}
-				}
-				if revisionLoadFailed[item.ChunkID] {
-					sourceStatus = "history_read_failed"
-					reasons = append(reasons, "source_revision_history_unavailable")
-				} else {
-					for _, revision := range revisionCache[item.ChunkID] {
-						if revision != nil && revision.Revision == *item.QuestionRevision {
-							sourceStatus = "historical_revision"
-							record.PositivePassage = revision.Content
-							break
-						}
-					}
-					if sourceStatus != "historical_revision" {
-						sourceStatus = "revision_unavailable"
-						reasons = append(reasons, "source_revision_not_retained")
-					}
-				}
-			}
-			if !chunk.IsEnabled {
-				reasons = append(reasons, "chunk_disabled")
-			}
-		} else {
-			reasons = append(reasons, "source_chunk_missing")
-		}
+		sourceContent, sourceStatus, sourceReasons := resolver.resolve(item, chunk)
+		record.PositivePassage = sourceContent
+		reasons = append(reasons, sourceReasons...)
 		if strings.TrimSpace(item.Question) == "" {
 			reasons = append(reasons, "question_missing")
 		}
 		if strings.TrimSpace(record.PositivePassage) == "" {
 			reasons = append(reasons, "source_text_empty")
+		}
+		switch {
+		case strings.TrimSpace(item.Question) == "":
+			record.AnswerStatus = "missing_question"
+		case strings.TrimSpace(record.PositivePassage) == "":
+			record.AnswerStatus = "source_unavailable"
+		default:
+			if !canExtractAnswers {
+				c.Error(errors.NewServiceUnavailableError("Question answer extraction is unavailable"))
+				return
+			}
+			cacheDigest := sha256.Sum256([]byte(item.KnowledgeBaseID + "\x00" + item.KnowledgeID + "\x00" + item.Question + "\x00" + record.PositivePassage))
+			cacheKey := hex.EncodeToString(cacheDigest[:])
+			cached, exists := answerCache[cacheKey]
+			if !exists {
+				answer, modelID, err := extractor.ExtractGeneratedQuestionAnswer(
+					c.Request.Context(), item.KnowledgeBaseID, item.KnowledgeID, item.Question, record.PositivePassage,
+				)
+				if err != nil {
+					logger.ErrorWithFields(c.Request.Context(), err, map[string]interface{}{
+						"knowledge_base_id": item.KnowledgeBaseID,
+						"chunk_id":          item.ChunkID,
+						"question_id":       generatedQuestionStringValue(item.QuestionID),
+					})
+					c.Error(errors.NewServiceUnavailableError("Could not extract all training answers"))
+					return
+				}
+				cached = cachedAnswer{answer: strings.TrimSpace(answer), modelID: modelID}
+				answerCache[cacheKey] = cached
+			}
+			record.Answer = cached.answer
+			record.Metadata.AnswerModelID = cached.modelID
+			if cached.answer == "" {
+				record.AnswerStatus = "not_found"
+				reasons = append(reasons, "answer_not_found")
+			} else {
+				record.AnswerStatus = "answered"
+			}
 		}
 		record.SourceRevisionStatus = sourceStatus
 		record.TrainingExclusion = reasons
