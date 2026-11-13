@@ -17,6 +17,10 @@ type generatedQuestionAnswerStore interface {
 	UpsertGeneratedQuestionAnswer(ctx context.Context, tenantID uint64, answer *types.GeneratedQuestionAnswer) error
 }
 
+type generatedQuestionAnswerBatchStore interface {
+	UpsertGeneratedQuestionAnswers(ctx context.Context, tenantID uint64, answers []*types.GeneratedQuestionAnswer) error
+}
+
 type generatedQuestionAnswerListReader interface {
 	ListGeneratedQuestionAnswersByKnowledgeBase(
 		ctx context.Context, tenantID uint64, knowledgeBaseID string,
@@ -189,7 +193,7 @@ func (h *ChunkHandler) getOrGenerateGeneratedQuestionAnswer(
 		entry = generatedQuestionAnswerCacheEntry{}
 	}
 	if !foundInRequest {
-		result, modelID, extractErr := extractGeneratedQuestionAnswer(h.service, ctx, item, source)
+		result, modelID, extractErr := extractGeneratedQuestionAnswerWithRetry(h.service, ctx, item, source)
 		if extractErr != nil {
 			return nil, false, extractErr
 		}

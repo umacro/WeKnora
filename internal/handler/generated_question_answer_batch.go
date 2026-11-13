@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,38 @@ type generatedQuestionAnswerBatchManager struct {
 type generatedQuestionAnswerChunkBatch struct {
 	chunkID string
 	items   []generatedQuestionListItem
+}
+
+type generatedQuestionAnswerPending struct {
+	item                 generatedQuestionListItem
+	source               string
+	sourceRevisionStatus string
+	sourceHash           string
+	recordID             string
+}
+
+type generatedQuestionAnswerPendingQuestion struct {
+	question string
+	items    []generatedQuestionAnswerPending
+}
+
+const (
+	defaultGeneratedQuestionAnswerWorkers   = 4
+	maxGeneratedQuestionAnswerWorkers       = 16
+	generatedQuestionAnswerQuestionsPerCall = 5
+)
+
+func generatedQuestionAnswerWorkerCount() int {
+	count := defaultGeneratedQuestionAnswerWorkers
+	if configured := strings.TrimSpace(os.Getenv("WEKNORA_GENERATED_QUESTION_ANSWER_WORKERS")); configured != "" {
+		if parsed, err := strconv.Atoi(configured); err == nil && parsed > 0 {
+			count = parsed
+		}
+	}
+	if count > maxGeneratedQuestionAnswerWorkers {
+		return maxGeneratedQuestionAnswerWorkers
+	}
+	return count
 }
 
 func newGeneratedQuestionAnswerBatchManager() *generatedQuestionAnswerBatchManager {
@@ -370,10 +404,11 @@ func (h *ChunkHandler) prepareAndRunGeneratedQuestionAnswerBatch(
 	if len(groups) == 0 {
 		return nil
 	}
-	jobs := make(chan generatedQuestionAnswerChunkBatch, 3)
+	workerCount := generatedQuestionAnswerWorkerCount()
+	jobs := make(chan generatedQuestionAnswerChunkBatch, workerCount)
 	var workers sync.WaitGroup
-	workers.Add(3)
-	for workerIndex := 0; workerIndex < 3; workerIndex++ {
+	workers.Add(workerCount)
+	for workerIndex := 0; workerIndex < workerCount; workerIndex++ {
 		go func() {
 			defer workers.Done()
 			for group := range jobs {
@@ -451,6 +486,7 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 	}
 	resolver := newGeneratedQuestionSourceResolver(ctx, h)
 	requestCache := make(map[string]generatedQuestionAnswerCacheEntry)
+	pending := make([]generatedQuestionAnswerPending, 0, len(group.items))
 	for _, item := range group.items {
 		if ctx.Err() != nil {
 			return
@@ -462,6 +498,19 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 		}
 		if strings.TrimSpace(passage) == "" {
 			task.record("source_unavailable")
+			continue
+		}
+		if item.AnswerState == "not_generated" {
+			candidate, candidateErr := makeGeneratedQuestionAnswerPending(ctx, item, passage, sourceStatus)
+			if candidateErr != nil {
+				logger.ErrorWithFields(ctx, candidateErr, map[string]interface{}{
+					"knowledge_base_id": kbID, "chunk_id": item.ChunkID,
+					"question_id": generatedQuestionStringValue(item.QuestionID),
+				})
+				task.record("failed")
+				continue
+			}
+			pending = append(pending, candidate)
 			continue
 		}
 		answer, _, answerErr := h.getOrGenerateGeneratedQuestionAnswer(
@@ -483,5 +532,209 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 			continue
 		}
 		task.record(answer.AnswerStatus)
+	}
+	h.processGeneratedQuestionAnswerPending(ctx, kbID, pending, task)
+}
+
+func makeGeneratedQuestionAnswerPending(
+	ctx context.Context, item generatedQuestionListItem, source, sourceRevisionStatus string,
+) (generatedQuestionAnswerPending, error) {
+	tenantID := types.MustTenantIDFromContext(ctx)
+	sourceHash := generatedQuestionAnswerSourceHash(source)
+	identity := generatedQuestionAnswerIdentity{
+		TenantID: tenantID, KnowledgeBaseID: item.KnowledgeBaseID,
+		KnowledgeID: item.KnowledgeID, ChunkID: item.ChunkID,
+		QuestionID:       generatedQuestionStringValue(item.QuestionID),
+		QuestionPosition: item.QuestionPosition, QuestionRevision: item.QuestionRevision,
+		Question: item.Question, SourceHash: sourceHash,
+	}
+	recordID, err := generatedQuestionAnswerRecordID(identity)
+	if err != nil {
+		return generatedQuestionAnswerPending{}, fmt.Errorf("failed to identify generated question answer: %w", err)
+	}
+	return generatedQuestionAnswerPending{
+		item: item, source: source, sourceRevisionStatus: sourceRevisionStatus,
+		sourceHash: sourceHash, recordID: recordID,
+	}, nil
+}
+
+func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
+	ctx context.Context, kbID string, pending []generatedQuestionAnswerPending,
+	task *generatedQuestionAnswerBatchTask,
+) {
+	if len(pending) == 0 || ctx.Err() != nil {
+		return
+	}
+	store, ok := h.service.GetRepository().(generatedQuestionAnswerStore)
+	if !ok {
+		for range pending {
+			task.record("failed")
+		}
+		return
+	}
+	// Batch only items with an identical source document and exact source text.
+	// This avoids mixing historical revisions even when they share a Chunk ID.
+	grouped := make(map[string][]generatedQuestionAnswerPending)
+	groupOrder := make([]string, 0)
+	for _, candidate := range pending {
+		key := candidate.item.KnowledgeID + "\x00" + candidate.sourceHash
+		if _, exists := grouped[key]; !exists {
+			groupOrder = append(groupOrder, key)
+		}
+		grouped[key] = append(grouped[key], candidate)
+	}
+	for _, key := range groupOrder {
+		if ctx.Err() != nil {
+			return
+		}
+		candidates := grouped[key]
+		uniqueQuestions := make([]generatedQuestionAnswerPendingQuestion, 0, len(candidates))
+		questionIndex := make(map[string]int, len(candidates))
+		for _, candidate := range candidates {
+			saved, err := store.GetGeneratedQuestionAnswer(ctx, types.MustTenantIDFromContext(ctx), candidate.recordID)
+			if err != nil {
+				logger.ErrorWithFields(ctx, err, map[string]interface{}{
+					"knowledge_base_id": kbID, "chunk_id": candidate.item.ChunkID,
+					"question_id": generatedQuestionStringValue(candidate.item.QuestionID),
+				})
+				task.record("failed")
+				continue
+			}
+			if saved != nil {
+				task.record(saved.AnswerStatus)
+				continue
+			}
+			if index, exists := questionIndex[candidate.item.Question]; exists {
+				uniqueQuestions[index].items = append(uniqueQuestions[index].items, candidate)
+				continue
+			}
+			questionIndex[candidate.item.Question] = len(uniqueQuestions)
+			uniqueQuestions = append(uniqueQuestions, generatedQuestionAnswerPendingQuestion{
+				question: candidate.item.Question, items: []generatedQuestionAnswerPending{candidate},
+			})
+		}
+		for start := 0; start < len(uniqueQuestions); start += generatedQuestionAnswerQuestionsPerCall {
+			if ctx.Err() != nil {
+				return
+			}
+			end := start + generatedQuestionAnswerQuestionsPerCall
+			if end > len(uniqueQuestions) {
+				end = len(uniqueQuestions)
+			}
+			questions := uniqueQuestions[start:end]
+			texts := make([]string, len(questions))
+			for index, question := range questions {
+				texts[index] = question.question
+			}
+			var results []types.GeneratedQuestionAnswerExtraction
+			var modelID string
+			var err error
+			if len(texts) > 1 {
+				if _, supportsBatch := h.service.(generatedQuestionAnswerBatchExtractor); !supportsBatch {
+					results = make([]types.GeneratedQuestionAnswerExtraction, len(questions))
+					for index, question := range questions {
+						item := question.items[0].item
+						results[index], modelID, err = extractGeneratedQuestionAnswerWithRetry(
+							h.service, ctx, item, question.items[0].source,
+						)
+						if err != nil {
+							break
+						}
+					}
+				} else {
+					results, modelID, err = extractGeneratedQuestionAnswerBatchWithRetry(
+						h.service, ctx, kbID, questions[0].items[0].item.KnowledgeID, texts,
+						questions[0].items[0].source,
+					)
+				}
+			} else {
+				item := questions[0].items[0].item
+				var result types.GeneratedQuestionAnswerExtraction
+				result, modelID, err = extractGeneratedQuestionAnswerWithRetry(
+					h.service, ctx, item, questions[0].items[0].source,
+				)
+				if err == nil {
+					results = []types.GeneratedQuestionAnswerExtraction{result}
+				}
+			}
+			if err != nil && len(texts) > 1 && strings.Contains(err.Error(), "invalid generated question answer batch response") {
+				// A malformed array response should not lose every answer in the
+				// group; retry those questions individually using the proven path.
+				results = make([]types.GeneratedQuestionAnswerExtraction, len(questions))
+				err = nil
+				for index, question := range questions {
+					item := question.items[0].item
+					results[index], modelID, err = extractGeneratedQuestionAnswerWithRetry(
+						h.service, ctx, item, question.items[0].source,
+					)
+					if err != nil {
+						break
+					}
+				}
+			}
+			if err != nil || len(results) != len(questions) {
+				if err == nil {
+					err = fmt.Errorf("answer batch returned %d results for %d questions", len(results), len(questions))
+				}
+				logger.ErrorWithFields(ctx, err, map[string]interface{}{
+					"knowledge_base_id": kbID,
+					"chunk_id":          questions[0].items[0].item.ChunkID,
+					"question_count":    len(questions),
+				})
+				for _, question := range questions {
+					for range question.items {
+						task.record("failed")
+					}
+				}
+				continue
+			}
+			answersToSave := make([]*types.GeneratedQuestionAnswer, 0)
+			for index, question := range questions {
+				result := results[index]
+				entry := generatedQuestionAnswerCacheEntry{
+					answer: strings.TrimSpace(result.Answer), status: result.Status, modelID: modelID,
+				}
+				for _, candidate := range question.items {
+					now := time.Now().UTC()
+					answer := &types.GeneratedQuestionAnswer{
+						ID: candidate.recordID, TenantID: types.MustTenantIDFromContext(ctx),
+						KnowledgeBaseID: candidate.item.KnowledgeBaseID, KnowledgeID: candidate.item.KnowledgeID,
+						ChunkID: candidate.item.ChunkID, QuestionID: generatedQuestionStringValue(candidate.item.QuestionID),
+						QuestionPosition: candidate.item.QuestionPosition, QuestionRevision: candidate.item.QuestionRevision,
+						Question: candidate.item.Question, SourceHash: candidate.sourceHash,
+						Answer: entry.answer, AnswerStatus: entry.status, AnswerModelID: entry.modelID,
+						SourceRevisionStatus: candidate.sourceRevisionStatus, CreatedAt: now, UpdatedAt: now,
+					}
+					answersToSave = append(answersToSave, answer)
+				}
+				if batchStore, supportsBatchWrite := h.service.GetRepository().(generatedQuestionAnswerBatchStore); supportsBatchWrite {
+					if saveErr := batchStore.UpsertGeneratedQuestionAnswers(
+						ctx, types.MustTenantIDFromContext(ctx), answersToSave,
+					); saveErr == nil {
+						for _, answer := range answersToSave {
+							task.record(answer.AnswerStatus)
+						}
+						continue
+					} else {
+						logger.ErrorWithFields(ctx, saveErr, map[string]interface{}{
+							"knowledge_base_id": kbID,
+							"chunk_id":          questions[0].items[0].item.ChunkID,
+							"answer_count":      len(answersToSave),
+						})
+					}
+				}
+				for _, answer := range answersToSave {
+					if saveErr := store.UpsertGeneratedQuestionAnswer(ctx, answer.TenantID, answer); saveErr != nil {
+						logger.ErrorWithFields(ctx, saveErr, map[string]interface{}{
+							"knowledge_base_id": kbID, "chunk_id": answer.ChunkID,
+							"question_id": answer.QuestionID,
+						})
+						task.record("failed")
+						continue
+					}
+					task.record(answer.AnswerStatus)
+				}
+			}
+		}
 	}
 }

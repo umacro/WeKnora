@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -26,6 +28,12 @@ type generatedQuestionAnswerKnowledgeExtractor interface {
 	ExtractGeneratedQuestionAnswer(ctx context.Context, knowledgeBaseID, knowledgeID, question, source string) (types.GeneratedQuestionAnswerExtraction, string, error)
 }
 
+type generatedQuestionAnswerBatchExtractor interface {
+	ExtractGeneratedQuestionAnswerBatch(
+		ctx context.Context, knowledgeBaseID, knowledgeID string, questions []string, source string,
+	) ([]types.GeneratedQuestionAnswerExtraction, string, error)
+}
+
 func supportsGeneratedQuestionAnswerExtraction(service interface{}) bool {
 	if _, ok := service.(generatedQuestionAnswerExtractor); ok {
 		return true
@@ -46,6 +54,73 @@ func extractGeneratedQuestionAnswer(
 		return extractor.ExtractGeneratedQuestionAnswer(ctx, item.KnowledgeBaseID, item.Question, source)
 	}
 	return types.GeneratedQuestionAnswerExtraction{}, "", errors.NewServiceUnavailableError("Question answer extraction is unavailable")
+}
+
+func extractGeneratedQuestionAnswerWithRetry(
+	service interface{}, ctx context.Context, item generatedQuestionListItem, source string,
+) (types.GeneratedQuestionAnswerExtraction, string, error) {
+	var result types.GeneratedQuestionAnswerExtraction
+	var modelID string
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		result, modelID, err = extractGeneratedQuestionAnswer(service, ctx, item, source)
+		if err == nil || !waitGeneratedQuestionAnswerRetry(ctx, attempt, err) {
+			return result, modelID, err
+		}
+	}
+	return result, modelID, err
+}
+
+func extractGeneratedQuestionAnswerBatchWithRetry(
+	service interface{}, ctx context.Context, knowledgeBaseID, knowledgeID string, questions []string, source string,
+) ([]types.GeneratedQuestionAnswerExtraction, string, error) {
+	extractor, ok := service.(generatedQuestionAnswerBatchExtractor)
+	if !ok {
+		return nil, "", fmt.Errorf("batched question answer extraction is unavailable")
+	}
+	var results []types.GeneratedQuestionAnswerExtraction
+	var modelID string
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		results, modelID, err = extractor.ExtractGeneratedQuestionAnswerBatch(
+			ctx, knowledgeBaseID, knowledgeID, questions, source,
+		)
+		if err == nil || !waitGeneratedQuestionAnswerRetry(ctx, attempt, err) {
+			return results, modelID, err
+		}
+	}
+	return results, modelID, err
+}
+
+func waitGeneratedQuestionAnswerRetry(ctx context.Context, attempt int, err error) bool {
+	if ctx.Err() != nil || err == nil || !isTransientGeneratedQuestionAnswerError(err) || attempt >= 2 {
+		return false
+	}
+	delay := time.Duration(1<<attempt) * 500 * time.Millisecond
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func isTransientGeneratedQuestionAnswerError(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"failed to connect to validated addresses", "connection refused", "connection reset",
+		"connection timed out", "i/o timeout", "deadline exceeded", "temporarily unavailable",
+		"too many requests", "status code 429", "status 429", "status code 500", "status 500",
+		"status code 502", "status 502", "status code 503", "status 503", "status code 504", "status 504",
+		"unexpected eof", "server closed idle connection",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type generatedQuestionSourceResolver struct {

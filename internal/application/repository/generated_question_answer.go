@@ -60,3 +60,26 @@ func (r *chunkRepository) UpsertGeneratedQuestionAnswer(
 		}).
 		Create(answer).Error
 }
+
+// UpsertGeneratedQuestionAnswers persists one model response in a single
+// database operation instead of opening a write transaction for every answer.
+func (r *chunkRepository) UpsertGeneratedQuestionAnswers(
+	ctx context.Context, tenantID uint64, answers []*types.GeneratedQuestionAnswer,
+) error {
+	if len(answers) == 0 {
+		return nil
+	}
+	for _, answer := range answers {
+		if answer == nil || answer.TenantID != tenantID || answer.ID == "" {
+			return errors.New("invalid generated question answer batch")
+		}
+	}
+	return r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"answer", "answer_status", "answer_model_id", "source_revision_status", "updated_at",
+			}),
+		}).
+		CreateInBatches(answers, 20).Error
+}
