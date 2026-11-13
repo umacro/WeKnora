@@ -64,6 +64,17 @@
         </div>
       </div>
 
+      <div v-if="answerStateCounts" class="generated-questions-state-summary" role="status">
+        {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsAnswerStateSummary', {
+          total: answerStateCounts.total,
+          notGenerated: answerStateCounts.not_generated,
+          answered: answerStateCounts.answered,
+          partial: answerStateCounts.partial_evidence,
+          insufficient: answerStateCounts.insufficient_source,
+          notFound: answerStateCounts.not_found
+        }) }}
+      </div>
+
       <div v-if="answerBatch.running" class="generated-questions-answer-progress" role="status">
         <div class="generated-questions-answer-progress-heading">
           <span v-if="answerBatch.phase === 'preparing'">
@@ -78,14 +89,15 @@
           </t-button>
         </div>
         <progress v-if="answerBatch.phase !== 'preparing'"
-          :max="Math.max(answerBatch.total, 1)" :value="answerBatch.done" />
+          :max="Math.max(answerBatch.total, 1)" :value="Math.min(answerBatch.done, answerBatch.total)" />
         <div class="generated-questions-answer-progress-counts">
           {{ $t('knowledgeEditor.wikiBrowser.generatedQuestionsGenerationSummary', {
             answered: answerBatch.answered,
             partial: answerBatch.partialEvidence,
             insufficient: answerBatch.insufficient,
             unavailable: answerBatch.unavailable,
-            failed: answerBatch.failed
+            failed: answerBatch.failed,
+            duplicateWork: answerBatch.duplicateWork
           }) }}
         </div>
       </div>
@@ -250,6 +262,7 @@ import {
   stopGeneratedQuestionAnswerBatch,
   type GeneratedQuestionAnswerState,
   type GeneratedQuestionAnswerBatchSnapshot,
+  type GeneratedQuestionAnswerStateCounts,
   type GeneratedQuestionDuplicateMode,
   type GeneratedQuestionListItem,
   type GeneratedQuestionListParams,
@@ -276,6 +289,7 @@ const pageSize = ref(20)
 const total = ref(0)
 const rawTotal = ref(0)
 const dataWarnings = ref(0)
+const answerStateCounts = ref<GeneratedQuestionAnswerStateCounts | null>(null)
 const loading = ref(false)
 const copying = ref(false)
 const copyingFiltered = ref(false)
@@ -293,6 +307,7 @@ const answerBatch = reactive({
   insufficient: 0,
   unavailable: 0,
   failed: 0,
+  duplicateWork: 0,
 })
 const expandedSources = reactive<Record<string, boolean>>({})
 const copyingRows = reactive<Record<string, boolean>>({})
@@ -373,6 +388,7 @@ async function loadPage(requestPage = 1) {
     rows.value = Array.isArray(body?.data) ? body.data : []
     total.value = Number(body?.total || 0)
     rawTotal.value = Number(body?.raw_total || 0)
+    answerStateCounts.value = body?.answer_state_counts || null
     dataWarnings.value = Number(body?.data_warnings || 0)
     page.value = Number(body?.page || requestPage)
     pageSize.value = Number(body?.page_size || pageSize.value)
@@ -380,6 +396,7 @@ async function loadPage(requestPage = 1) {
     rows.value = []
     total.value = 0
     rawTotal.value = 0
+    answerStateCounts.value = null
     dataWarnings.value = 0
     errorMessage.value = t('knowledgeEditor.wikiBrowser.generatedQuestionsReadFailed')
   } finally {
@@ -636,6 +653,7 @@ function syncAnswerBatch(snapshot: GeneratedQuestionAnswerBatchSnapshot) {
   answerBatch.insufficient = snapshot.insufficient
   answerBatch.unavailable = snapshot.unavailable
   answerBatch.failed = snapshot.failed
+  answerBatch.duplicateWork = snapshot.duplicate_work || 0
 }
 
 function answerBatchSummary() {
@@ -738,6 +756,7 @@ async function generateFilteredAnswers() {
   answerBatch.insufficient = 0
   answerBatch.unavailable = 0
   answerBatch.failed = 0
+  answerBatch.duplicateWork = 0
 
   try {
     const response = await startGeneratedQuestionAnswerBatch(props.kbId, filters) as any
@@ -909,6 +928,13 @@ async function downloadExport(format: 'csv' | 'json' | 'training_jsonl') {
 .generated-questions-count {
   color: var(--td-text-color-secondary);
   font-size: 13px;
+}
+
+.generated-questions-state-summary {
+  margin-top: -4px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .generated-questions-answer-progress {

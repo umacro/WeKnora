@@ -30,6 +30,7 @@ type generatedQuestionAnswerBatchSnapshot struct {
 	Insufficient    int    `json:"insufficient"`
 	Unavailable     int    `json:"unavailable"`
 	Failed          int    `json:"failed"`
+	DuplicateWork   int    `json:"duplicate_work"`
 	Error           string `json:"error,omitempty"`
 }
 
@@ -39,6 +40,8 @@ type generatedQuestionAnswerBatchTask struct {
 	tenantID uint64
 	cancel   context.CancelFunc
 	started  time.Time
+	processedRows map[string]string
+	overflow       int
 }
 
 type generatedQuestionAnswerBatchManager struct {
@@ -122,6 +125,7 @@ func (m *generatedQuestionAnswerBatchManager) create(
 		tenantID: tenantID,
 		cancel:   cancel,
 		started:  now,
+		processedRows: make(map[string]string),
 		snapshot: generatedQuestionAnswerBatchSnapshot{
 			ID: uuid.NewString(), KnowledgeBaseID: knowledgeBaseID, Status: "preparing",
 		},
@@ -175,22 +179,45 @@ func (t *generatedQuestionAnswerBatchTask) setTotal(total int) {
 	t.mu.Unlock()
 }
 
-func (t *generatedQuestionAnswerBatchTask) record(status string) {
+func (t *generatedQuestionAnswerBatchTask) record(rowKey, status string) {
 	t.mu.Lock()
+	if t.processedRows == nil {
+		t.processedRows = make(map[string]string)
+	}
+	if previousStatus, exists := t.processedRows[rowKey]; exists {
+		t.snapshot.DuplicateWork++
+		if previousStatus != status {
+			t.adjustStatus(previousStatus, -1)
+			t.adjustStatus(status, 1)
+			t.processedRows[rowKey] = status
+		}
+		t.mu.Unlock()
+		return
+	}
+	t.processedRows[rowKey] = status
+	if t.snapshot.Done >= t.snapshot.Total {
+		t.overflow++
+		t.mu.Unlock()
+		return
+	}
 	t.snapshot.Done++
+	t.adjustStatus(status, 1)
+	t.mu.Unlock()
+}
+
+func (t *generatedQuestionAnswerBatchTask) adjustStatus(status string, delta int) {
 	switch status {
 	case "answered":
-		t.snapshot.Answered++
+		t.snapshot.Answered += delta
 	case "partial_evidence":
-		t.snapshot.PartialEvidence++
+		t.snapshot.PartialEvidence += delta
 	case "insufficient_source", "not_found":
-		t.snapshot.Insufficient++
+		t.snapshot.Insufficient += delta
 	case "source_unavailable", "missing_question":
-		t.snapshot.Unavailable++
+		t.snapshot.Unavailable += delta
 	default:
-		t.snapshot.Failed++
+		t.snapshot.Failed += delta
 	}
-	t.mu.Unlock()
 }
 
 func (t *generatedQuestionAnswerBatchTask) fail(err error) {
@@ -300,6 +327,14 @@ func (h *ChunkHandler) runGeneratedQuestionAnswerBatch(
 	}
 	if ctx.Err() != nil {
 		task.setStatus("stopped")
+		return
+	}
+	snapshot := task.snapshotValue()
+	task.mu.RLock()
+	overflow := task.overflow
+	task.mu.RUnlock()
+	if overflow > 0 || snapshot.Done != snapshot.Total {
+		task.fail(fmt.Errorf("answer task accounted for %d of %d selected questions", snapshot.Done, snapshot.Total))
 		return
 	}
 	task.setStatus("completed")
@@ -433,7 +468,16 @@ func (h *ChunkHandler) prepareAndRunGeneratedQuestionAnswerBatch(
 	}
 	close(jobs)
 	workers.Wait()
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	task.mu.RLock()
+	overflow := task.overflow
+	task.mu.RUnlock()
+	if overflow > 0 {
+		return fmt.Errorf("answer task processed %d unique rows beyond its selected total", overflow)
+	}
+	return nil
 }
 
 func assignGeneratedQuestionBatchDuplicates(kbID string, items []generatedQuestionListItem) {
@@ -479,8 +523,8 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 		if ctx.Err() != nil {
 			return
 		}
-		for range group.items {
-			task.record("source_unavailable")
+		for _, item := range group.items {
+			task.record(item.RowKey, "source_unavailable")
 		}
 		return
 	}
@@ -493,11 +537,11 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 		}
 		passage, sourceStatus, _ := resolver.resolve(item, chunk)
 		if strings.TrimSpace(item.Question) == "" {
-			task.record("missing_question")
+			task.record(item.RowKey, "missing_question")
 			continue
 		}
 		if strings.TrimSpace(passage) == "" {
-			task.record("source_unavailable")
+			task.record(item.RowKey, "source_unavailable")
 			continue
 		}
 		if item.AnswerState == "not_generated" {
@@ -507,7 +551,7 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 					"knowledge_base_id": kbID, "chunk_id": item.ChunkID,
 					"question_id": generatedQuestionStringValue(item.QuestionID),
 				})
-				task.record("failed")
+				task.record(item.RowKey, "failed")
 				continue
 			}
 			pending = append(pending, candidate)
@@ -524,14 +568,14 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerChunk(
 				"knowledge_base_id": kbID, "chunk_id": item.ChunkID,
 				"question_id": generatedQuestionStringValue(item.QuestionID),
 			})
-			task.record("failed")
+			task.record(item.RowKey, "failed")
 			continue
 		}
 		if answer == nil {
-			task.record("failed")
+			task.record(item.RowKey, "failed")
 			continue
 		}
-		task.record(answer.AnswerStatus)
+		task.record(item.RowKey, answer.AnswerStatus)
 	}
 	h.processGeneratedQuestionAnswerPending(ctx, kbID, pending, task)
 }
@@ -567,8 +611,8 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
 	}
 	store, ok := h.service.GetRepository().(generatedQuestionAnswerStore)
 	if !ok {
-		for range pending {
-			task.record("failed")
+		for _, candidate := range pending {
+			task.record(candidate.item.RowKey, "failed")
 		}
 		return
 	}
@@ -597,11 +641,11 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
 					"knowledge_base_id": kbID, "chunk_id": candidate.item.ChunkID,
 					"question_id": generatedQuestionStringValue(candidate.item.QuestionID),
 				})
-				task.record("failed")
+				task.record(candidate.item.RowKey, "failed")
 				continue
 			}
 			if saved != nil {
-				task.record(saved.AnswerStatus)
+				task.record(candidate.item.RowKey, saved.AnswerStatus)
 				continue
 			}
 			if index, exists := questionIndex[candidate.item.Question]; exists {
@@ -682,8 +726,8 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
 					"question_count":    len(questions),
 				})
 				for _, question := range questions {
-					for range question.items {
-						task.record("failed")
+					for _, candidate := range question.items {
+						task.record(candidate.item.RowKey, "failed")
 					}
 				}
 				continue
@@ -711,8 +755,8 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
 					if saveErr := batchStore.UpsertGeneratedQuestionAnswers(
 						ctx, types.MustTenantIDFromContext(ctx), answersToSave,
 					); saveErr == nil {
-						for _, answer := range answersToSave {
-							task.record(answer.AnswerStatus)
+						for _, candidate := range question.items {
+							task.record(candidate.item.RowKey, entry.status)
 						}
 						continue
 					} else {
@@ -723,16 +767,16 @@ func (h *ChunkHandler) processGeneratedQuestionAnswerPending(
 						})
 					}
 				}
-				for _, answer := range answersToSave {
+				for answerIndex, answer := range answersToSave {
 					if saveErr := store.UpsertGeneratedQuestionAnswer(ctx, answer.TenantID, answer); saveErr != nil {
 						logger.ErrorWithFields(ctx, saveErr, map[string]interface{}{
 							"knowledge_base_id": kbID, "chunk_id": answer.ChunkID,
 							"question_id": answer.QuestionID,
 						})
-						task.record("failed")
+						task.record(question.items[answerIndex].item.RowKey, "failed")
 						continue
 					}
-					task.record(answer.AnswerStatus)
+					task.record(question.items[answerIndex].item.RowKey, answer.AnswerStatus)
 				}
 			}
 		}

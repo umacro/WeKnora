@@ -792,9 +792,19 @@ export interface GeneratedQuestionListResponse {
   data: GeneratedQuestionListItem[];
   total: number;
   raw_total: number;
+  answer_state_counts: GeneratedQuestionAnswerStateCounts;
   data_warnings: number;
   page: number;
   page_size: number;
+}
+
+export interface GeneratedQuestionAnswerStateCounts {
+  total: number;
+  not_generated: number;
+  answered: number;
+  partial_evidence: number;
+  insufficient_source: number;
+  not_found: number;
 }
 
 export interface GeneratedQuestionAnswerResponse {
@@ -823,6 +833,7 @@ export interface GeneratedQuestionAnswerBatchSnapshot {
   insufficient: number;
   unavailable: number;
   failed: number;
+  duplicate_work?: number;
   error?: string;
 }
 

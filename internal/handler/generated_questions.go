@@ -73,6 +73,15 @@ type generatedQuestionListQuery struct {
 	Format        string
 }
 
+type generatedQuestionAnswerStateCounts struct {
+	Total             int `json:"total"`
+	NotGenerated      int `json:"not_generated"`
+	Answered          int `json:"answered"`
+	PartialEvidence   int `json:"partial_evidence"`
+	Insufficient      int `json:"insufficient_source"`
+	LegacyNotFound    int `json:"not_found"`
+}
+
 type generatedQuestionTrainingRecord struct {
 	Query                string                            `json:"query"`
 	Answer               string                            `json:"answer"`
@@ -168,6 +177,7 @@ func (h *ChunkHandler) ListGeneratedQuestions(c *gin.Context) {
 		}
 		applyGeneratedQuestionAnswerStates(items, answers)
 	}
+	answerStateCounts := countGeneratedQuestionAnswerStates(items)
 	filtered := filterGeneratedQuestionItems(items, query)
 	rawTotal := len(filtered)
 	assignGeneratedQuestionDuplicates(kbID, filtered)
@@ -202,10 +212,30 @@ func (h *ChunkHandler) ListGeneratedQuestions(c *gin.Context) {
 		"data":          pageItems,
 		"total":         total,
 		"raw_total":     rawTotal,
+		"answer_state_counts": answerStateCounts,
 		"data_warnings": warnings,
 		"page":          query.Page,
 		"page_size":     query.PageSize,
 	})
+}
+
+func countGeneratedQuestionAnswerStates(items []generatedQuestionListItem) generatedQuestionAnswerStateCounts {
+	counts := generatedQuestionAnswerStateCounts{Total: len(items)}
+	for _, item := range items {
+		switch item.AnswerState {
+		case types.GeneratedQuestionAnswerStatusAnswered:
+			counts.Answered++
+		case types.GeneratedQuestionAnswerStatusPartialEvidence:
+			counts.PartialEvidence++
+		case types.GeneratedQuestionAnswerStatusInsufficientSource:
+			counts.Insufficient++
+		case types.GeneratedQuestionAnswerStatusLegacyNotFound:
+			counts.LegacyNotFound++
+		default:
+			counts.NotGenerated++
+		}
+	}
+	return counts
 }
 
 func parseGeneratedQuestionListQuery(c *gin.Context) (generatedQuestionListQuery, error) {
